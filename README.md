@@ -1,29 +1,44 @@
 # cmux-remote-mirror
 
-Remote makinedeki [cmux](https://github.com/manaflow-ai/cmux) workspace ve pane yapısını lokal cmux'te aynı isimlerle oluşturur. Her lokal pane, remote'daki ilgili tmux session'ına SSH ile bağlanır.
+Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane structure to local cmux with matching names. Each local pane connects to the corresponding remote tmux session via SSH.
 
-## Gereksinimler
+## Requirements
 
 - [uv](https://github.com/astral-sh/uv)
-- Lokal ve remote makinede [cmux](https://github.com/manaflow-ai/cmux)
-- Remote makinede tmux
-- SSH erişimi (varsayılan host: `home`)
+- [cmux](https://github.com/manaflow-ai/cmux) on both local and remote machines
+- tmux on the remote machine
+- SSH access to the remote machine (default host: `home`)
 
-## Nasıl Çalışır
+## How It Works
 
-1. Remote makineye SSH ile bağlanıp cmux workspace/pane/surface yapısını ve tmux session listesini alır
-2. Her surface'in tmux status bar'ından session adını okuyarak surface-tmux eşleştirmesi yapar
-3. Lokal cmux'te aynı isimlerle workspace ve pane'ler oluşturur
-4. Her pane'e `ssh -t <host> tmux attach-session -t <session>` komutu gönderir
+1. Connects to the remote machine via SSH and collects the cmux workspace/pane/surface structure along with the tmux session list
+2. Maps each surface to its tmux session by reading the session name from the tmux status bar
+3. Creates workspaces and panes locally in cmux with the same names
+4. Sends `ssh -t <host> tmux attach-session -t <session>` to each pane
 
-## Kullanım
+## Usage
 
 ```bash
-# Varsayılan host (home)
+# Default host (home)
 ./cmux-remote-mirror.py
 
-# Farklı host
+# Custom host
 ./cmux-remote-mirror.py myhost
 ```
 
-> **Not:** Script'i cmux terminal'inin içinden çalıştırın (cmux CLI socket erişimi gereklidir).
+> **Note:** Run this script from inside a cmux terminal (requires cmux CLI socket access).
+
+## Remote Setup
+
+Add the following to your shell profile (e.g. `~/.zshrc`) on the remote machine. This automatically starts a tmux session for each cmux terminal, using the workspace and surface IDs as the session name:
+
+```bash
+# Auto-start tmux inside cmux terminals
+if [ -n "$CMUX_WORKSPACE_ID" ] && [ -z "$TMUX" ]; then
+  SESSION_NAME="cmux-${CMUX_WORKSPACE_ID}-${CMUX_SURFACE_ID}"
+  tmux new-session -A -s "$SESSION_NAME"
+  cmux close-surface
+fi
+```
+
+This is required for the mirror script to work — it connects to these tmux sessions from the local machine.
