@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -16,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger("cmux-mirror")
+
+DEFAULT_SOCKET_PATH = "/tmp/cmux.sock"
 
 REMOTE_SCRIPT = r"""
 echo '___TREE_JSON_START___'
@@ -69,7 +72,27 @@ def parse_args() -> argparse.Namespace:
         default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         help="PATH to prepend on the remote machine",
     )
+    parser.add_argument(
+        "--socket",
+        default=None,
+        help="cmux socket path (default: $CMUX_SOCKET_PATH or /tmp/cmux.sock)",
+    )
     return parser.parse_args()
+
+
+def resolve_socket(socket_arg: str | None) -> str:
+    path = (
+        socket_arg
+        or os.environ.get("CMUX_SOCKET_PATH")
+        or DEFAULT_SOCKET_PATH
+    )
+    if not Path(path).is_socket():
+        raise MirrorError(
+            f"cmux socket not found at {path}. "
+            "Make sure cmux is running and the socket path is correct."
+        )
+    log.debug("Using cmux socket: %s", path)
+    return path
 
 
 def run_command(
@@ -94,8 +117,10 @@ def ssh_exec(
     return r.stdout
 
 
-def cmux_cmd(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return run_command(["cmux", *args], check=check, timeout=10)
+def cmux_cmd(
+    *args: str, socket: str, check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return run_command(["cmux", "--socket", socket, *args], check=check, timeout=10)
 
 
 def fetch_remote_data(host: str, remote_path: str) -> str:
@@ -231,13 +256,15 @@ def build_workspaces(
     return workspaces
 
 
-def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
+def create_local_workspaces(
+    host: str, workspaces: list[WorkspaceInfo], *, socket: str
+) -> None:
     log.info("Creating local cmux workspaces and panes...")
 
     for ws_info in workspaces:
         log.info("Workspace: %s (%d surfaces)", ws_info.title, len(ws_info.surfaces))
 
-        r = cmux_cmd("new-workspace")
+        r = cmux_cmd("new-workspace", socket=socket)
         if r.returncode != 0:
             log.warning(
                 "Could not create workspace: %s — %s",
@@ -247,7 +274,7 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
             continue
         time.sleep(0.5)
 
-        r = cmux_cmd("rename-workspace", ws_info.title)
+        r = cmux_cmd("rename-workspace", ws_info.title, socket=socket)
         log.debug("Renamed workspace to '%s' (exit=%d)", ws_info.title, r.returncode)
         time.sleep(0.3)
 
@@ -260,11 +287,11 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
                 log.debug("First surface, skipping pane/surface creation")
             else:
                 if sf.pane_index > current_pane_index:
-                    log.debug("Creating new pane (direction=right)")
-                    cmux_cmd("new-pane", "--direction", "right")
+                    log.debug("Creating new split (direction=right)")
+                    cmux_cmd("new-split", "right", socket=socket)
                 else:
                     log.debug("Creating new surface")
-                    cmux_cmd("new-surface")
+                    cmux_cmd("new-surface", socket=socket)
                 time.sleep(0.3)
 
             current_pane_index = max(current_pane_index, sf.pane_index)
@@ -277,9 +304,9 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
                 )
                 log.info("  -> %s", sf.tmux_session)
                 log.debug("  SSH command: %s", ssh_cmd)
-                cmux_cmd("send", ssh_cmd)
+                cmux_cmd("send", ssh_cmd, socket=socket)
                 time.sleep(0.2)
-                cmux_cmd("send-key", "Enter")
+                cmux_cmd("send-key", "Enter", socket=socket)
             else:
                 log.warning("  No tmux session found, leaving empty terminal")
 
@@ -307,11 +334,13 @@ def setup_logging() -> None:
     log.info("Log file: %s", log_file)
 
 
-def main() -> None:
+def _run() -> None:
     args = parse_args()
     setup_logging()
 
-    log.debug("Args: host=%s, remote_path=%s", args.host, args.remote_path)
+    log.debug("Args: host=%s, remote_path=%s, socket=%s", args.host, args.remote_path, args.socket)
+
+    socket = resolve_socket(args.socket)
 
     raw = fetch_remote_data(args.host, args.remote_path)
     tree, sessions, screen_map_raw = parse_remote_data(raw)
@@ -319,14 +348,18 @@ def main() -> None:
         sessions, screen_map_raw
     )
     workspaces = build_workspaces(tree, remaining_sessions, surface_to_session)
-    create_local_workspaces(args.host, workspaces)
+    create_local_workspaces(args.host, workspaces, socket=socket)
 
     log.info("Done! Remote cmux structure mirrored locally.")
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
-        main()
+        _run()
     except MirrorError as e:
         log.error("%s", e)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
