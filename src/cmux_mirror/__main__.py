@@ -226,6 +226,7 @@ def parse_remote_data(raw: str) -> tuple[dict, list[str]]:
     sessions = [s.strip() for s in tmux_sessions_raw.strip().splitlines() if s.strip()]
 
     log.debug("Parsed tree: %d windows", len(tree.get("windows", [])))
+    log.debug("Tree JSON (first 2000 chars): %s", tree_json_raw[:2000])
     log.debug("Parsed tmux sessions (%d): %s", len(sessions), sessions)
 
     return tree, sessions
@@ -234,18 +235,37 @@ def parse_remote_data(raw: str) -> tuple[dict, list[str]]:
 def map_sessions_to_surfaces(
     sessions: list[str], tree: dict
 ) -> dict[str, str]:
-    """Map surface refs to session names by matching surface UUIDs."""
+    """Map surface refs to session names by matching surface UUIDs.
+
+    Falls back to matching by (workspace_id, pane_index) when surface UUIDs
+    don't match (e.g. after a cmux restart that assigns new surface UUIDs).
+    """
     # Build UUID -> ref mapping from tree
     uuid_to_ref: dict[str, str] = {}
+    # Also build (workspace_id, pane_index) -> ref for fallback matching
+    ws_pane_to_ref: dict[tuple[str, int], str] = {}
+    surface_count = 0
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
+            ws_id = ws.get("id", "").upper()
             for pane in ws.get("panes", []):
+                pane_index = pane.get("index", 0)
                 for sf in pane.get("surfaces", []):
+                    surface_count += 1
+                    # Log a sample surface to confirm field presence
+                    if surface_count == 1:
+                        log.debug("Sample surface object keys=%s values=%s", list(sf.keys()), {k: sf[k] for k in list(sf.keys())[:6]})
                     if sf.get("id"):
                         uuid_to_ref[sf["id"].upper()] = sf["ref"]
+                    if ws_id:
+                        ws_pane_to_ref[(ws_id, pane_index)] = sf["ref"]
+
+    log.debug("Surface count: %d, uuid_to_ref entries: %d, ws_pane_to_ref entries: %d",
+              surface_count, len(uuid_to_ref), len(ws_pane_to_ref))
 
     # Parse sessions, match by surface UUID
     surface_to_session: dict[str, str] = {}
+    unmatched_sessions: list[tuple[str, dict]] = []
     for ses in sessions:
         parsed = parse_session_name(ses)
         if not parsed:
@@ -254,7 +274,63 @@ def map_sessions_to_surfaces(
         ref = uuid_to_ref.get(sf_uuid)
         if ref:
             surface_to_session[ref] = ses
-            log.debug("Mapped %s -> %s", ref, ses)
+            log.debug("Mapped (by surface UUID) %s -> %s", ref, ses)
+        else:
+            log.debug("No surface UUID match for session %s (UUID=%s). Available UUIDs: %s",
+                      ses, sf_uuid, list(uuid_to_ref.keys())[:10])
+            unmatched_sessions.append((ses, parsed))
+
+    # Fallback: match by (workspace_id, pane_index) when UUIDs are partially available
+    if unmatched_sessions and uuid_to_ref:
+        log.info("Surface UUID matching incomplete (%d/%d). Trying workspace+pane fallback...",
+                 len(surface_to_session), surface_count)
+        for ses, parsed in unmatched_sessions:
+            ws_uuid = parsed["workspace"].upper()
+            pane_idx = parsed["pane_index"]
+            ref = ws_pane_to_ref.get((ws_uuid, pane_idx))
+            if ref and ref not in surface_to_session:
+                surface_to_session[ref] = ses
+                log.debug("Mapped (by ws+pane fallback) %s -> %s (ws=%s, pane=%d)",
+                          ref, ses, ws_uuid, pane_idx)
+            else:
+                log.debug("Fallback miss for session %s (ws=%s, pane=%d). Available ws+pane keys: %s",
+                          ses, ws_uuid, pane_idx, list(ws_pane_to_ref.keys())[:10])
+
+    # Positional fallback: when tree has no UUID fields at all, match by
+    # workspace order and pane index (tree and sessions describe the same state)
+    if not surface_to_session and unmatched_sessions:
+        log.info("No UUID fields in tree. Using positional matching...")
+        from collections import OrderedDict
+
+        # Group sessions by workspace UUID, preserving first-seen order
+        ws_groups: OrderedDict[str, list[tuple[int, str]]] = OrderedDict()
+        for ses, parsed in unmatched_sessions:
+            ws_uuid = parsed["workspace"]
+            ws_groups.setdefault(ws_uuid, []).append((parsed["pane_index"], ses))
+        for group in ws_groups.values():
+            group.sort(key=lambda x: x[0])
+
+        # Walk tree workspaces in order and match to session groups positionally
+        ws_group_list = list(ws_groups.values())
+        tree_ws_idx = 0
+        for window in tree.get("windows", []):
+            for ws in window.get("workspaces", []):
+                if tree_ws_idx >= len(ws_group_list):
+                    break
+                group = ws_group_list[tree_ws_idx]
+                tree_surfaces: list[tuple[int, str]] = []
+                for pane in ws.get("panes", []):
+                    for sf in pane.get("surfaces", []):
+                        tree_surfaces.append((pane.get("index", 0), sf["ref"]))
+                tree_surfaces.sort(key=lambda x: x[0])
+
+                for (g_pane_idx, g_ses), (t_pane_idx, t_ref) in zip(group, tree_surfaces):
+                    if g_pane_idx == t_pane_idx:
+                        surface_to_session[t_ref] = g_ses
+                        log.debug("Mapped (by position) %s -> %s", t_ref, g_ses)
+                    else:
+                        log.warning("Pane index mismatch: session pane=%d, tree pane=%d", g_pane_idx, t_pane_idx)
+                tree_ws_idx += 1
 
     log.debug("Session mapping: %d mapped out of %d sessions", len(surface_to_session), len(sessions))
     return surface_to_session
