@@ -1,4 +1,4 @@
-# cmux-remote-mirror
+# cmux-mirror
 
 Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane structure to local cmux with matching names. Each local pane connects to the corresponding remote tmux session via SSH.
 
@@ -20,13 +20,19 @@ Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane str
 
 ```bash
 # Default host (home)
-./cmux-remote-mirror.py
+uvx cmux-mirror
 
 # Custom host
-./cmux-remote-mirror.py myhost
+uvx cmux-mirror myhost
+
+# Custom remote PATH
+uvx cmux-mirror myhost --remote-path /usr/local/bin:/usr/bin:/bin
+
+# Install from git
+uvx --from git+https://github.com/ensar/cmux cmux-mirror
 ```
 
-> **Note:** Run this script from inside a cmux terminal (requires cmux CLI socket access).
+> **Note:** Run this from inside a cmux terminal (requires cmux CLI socket access).
 
 ## Remote Setup
 

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cmux-mirror"
+version = "0.1.0"
+description = "Mirror remote cmux workspace structure to local cmux"
+requires-python = ">=3.11"
+
+[project.scripts]
+cmux-mirror = "cmux_mirror.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cmux_mirror"]
