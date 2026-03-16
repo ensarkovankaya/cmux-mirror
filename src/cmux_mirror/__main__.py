@@ -296,6 +296,24 @@ def build_workspaces(
     return workspaces
 
 
+def get_existing_workspace_titles(*, socket: str) -> set[str]:
+    """Return titles of all existing local workspaces."""
+    r = cmux_cmd("tree", "--all", "--json", socket=socket)
+    if r.returncode != 0 or not r.stdout.strip():
+        return set()
+    try:
+        tree = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        return set()
+    titles: set[str] = set()
+    for window in tree.get("windows", []):
+        for ws in window.get("workspaces", []):
+            title = ws.get("title", "").strip()
+            if title:
+                titles.add(title)
+    return titles
+
+
 def ensure_window(socket: str) -> None:
     """Ensure a cmux window exists, creating one if needed."""
     r = cmux_cmd("list-windows", socket=socket)
@@ -315,9 +333,13 @@ def create_local_workspaces(
     host: str, workspaces: list[WorkspaceInfo], *, socket: str
 ) -> None:
     ensure_window(socket)
+    existing_titles = get_existing_workspace_titles(socket=socket)
     log.info("Creating local cmux workspaces and panes...")
 
     for ws_info in workspaces:
+        if ws_info.title in existing_titles:
+            log.info("Workspace '%s' already exists, skipping", ws_info.title)
+            continue
         log.info("Workspace: %s (%d surfaces)", ws_info.title, len(ws_info.surfaces))
 
         r = cmux_cmd("new-workspace", socket=socket)
