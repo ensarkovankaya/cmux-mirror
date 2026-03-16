@@ -324,12 +324,9 @@ def map_sessions_to_surfaces(
                         tree_surfaces.append((pane.get("index", 0), sf["ref"]))
                 tree_surfaces.sort(key=lambda x: x[0])
 
-                for (g_pane_idx, g_ses), (t_pane_idx, t_ref) in zip(group, tree_surfaces):
-                    if g_pane_idx == t_pane_idx:
-                        surface_to_session[t_ref] = g_ses
-                        log.debug("Mapped (by position) %s -> %s", t_ref, g_ses)
-                    else:
-                        log.warning("Pane index mismatch: session pane=%d, tree pane=%d", g_pane_idx, t_pane_idx)
+                for (_, g_ses), (_, t_ref) in zip(group, tree_surfaces):
+                    surface_to_session[t_ref] = g_ses
+                    log.debug("Mapped (by position) %s -> %s", t_ref, g_ses)
                 tree_ws_idx += 1
 
     log.debug("Session mapping: %d mapped out of %d sessions", len(surface_to_session), len(sessions))
