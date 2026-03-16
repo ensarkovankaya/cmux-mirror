@@ -144,9 +144,15 @@ def ssh_exec(
 
 
 def cmux_cmd(
-    *args: str, socket: str, check: bool = False
+    *args: str,
+    socket: str,
+    workspace: str = "",
+    check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return run_command(["cmux", "--socket", socket, *args], check=check, timeout=10)
+    global_flags = ["cmux", "--socket", socket]
+    if workspace:
+        global_flags.extend(["--workspace", workspace])
+    return run_command([*global_flags, *args], check=check, timeout=10)
 
 
 def fetch_remote_data(host: str, remote_path: str) -> str:
@@ -333,15 +339,12 @@ def create_local_workspaces(
         log.debug("Created workspace ref=%s", ws_ref)
         time.sleep(0.5)
 
-        cmux_cmd("select-workspace", ws_ref, socket=socket)
-        time.sleep(0.3)
-
-        cmux_cmd("rename-workspace", ws_info.title, socket=socket)
+        cmux_cmd("rename-workspace", ws_info.title, socket=socket, workspace=ws_ref)
         log.debug("Renamed workspace to '%s'", ws_info.title)
         time.sleep(0.3)
 
         # Get the first surface ref from the newly created workspace
-        r = cmux_cmd("list-pane-surfaces", "--workspace", ws_ref, socket=socket)
+        r = cmux_cmd("list-pane-surfaces", socket=socket, workspace=ws_ref)
         first_sf_ref = ""
         if r.returncode == 0:
             for word in r.stdout.split():
@@ -361,10 +364,10 @@ def create_local_workspaces(
             else:
                 if sf.pane_index > current_pane_index:
                     log.debug("Creating new split (direction=right)")
-                    r = cmux_cmd("new-split", "right", socket=socket)
+                    r = cmux_cmd("new-split", "right", socket=socket, workspace=ws_ref)
                 else:
                     log.debug("Creating new surface")
-                    r = cmux_cmd("new-surface", socket=socket)
+                    r = cmux_cmd("new-surface", socket=socket, workspace=ws_ref)
                 # Parse surface ref from "OK surface:N workspace:M"
                 sf_ref = ""
                 if r.returncode == 0:
@@ -385,9 +388,9 @@ def create_local_workspaces(
                 )
                 log.info("  -> %s", sf.tmux_session)
                 log.debug("  SSH command: %s (surface=%s)", ssh_cmd, sf_ref)
-                cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
+                cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket, workspace=ws_ref)
                 time.sleep(0.2)
-                cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
+                cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket, workspace=ws_ref)
             else:
                 log.warning("  No tmux session found, leaving empty terminal")
 
