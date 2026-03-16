@@ -317,7 +317,7 @@ def get_existing_workspace_titles(*, socket: str) -> set[str]:
 def ensure_window(socket: str) -> None:
     """Ensure a cmux window exists, creating one if needed."""
     r = cmux_cmd("list-windows", socket=socket)
-    if r.returncode != 0 or not r.stdout.strip():
+    if r.returncode != 0 or not r.stdout.strip() or "No windows" in r.stdout:
         log.info("No cmux window found, creating one...")
         r = cmux_cmd("new-window", socket=socket)
         if r.returncode != 0:
