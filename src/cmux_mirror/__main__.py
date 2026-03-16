@@ -328,10 +328,16 @@ def create_local_workspaces(
                 (r.stderr or r.stdout).strip(),
             )
             continue
+        # Parse workspace ref from "OK workspace:N"
+        ws_ref = r.stdout.strip().split()[-1] if r.stdout.strip() else ""
+        log.debug("Created workspace ref=%s", ws_ref)
         time.sleep(0.5)
 
-        r = cmux_cmd("rename-workspace", ws_info.title, socket=socket)
-        log.debug("Renamed workspace to '%s' (exit=%d)", ws_info.title, r.returncode)
+        cmux_cmd("select-workspace", ws_ref, socket=socket)
+        time.sleep(0.3)
+
+        cmux_cmd("rename-workspace", ws_info.title, socket=socket)
+        log.debug("Renamed workspace to '%s'", ws_info.title)
         time.sleep(0.3)
 
         current_pane_index = -1
