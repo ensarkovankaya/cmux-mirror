@@ -402,7 +402,7 @@ def create_local_workspaces(
 
             if sf.tmux_session:
                 ssh_cmd = (
-                    f"ssh -t -o SetEnv=TERM=xterm-256color {host} "
+                    f"exec ssh -t -o SetEnv=TERM=xterm-256color {host} "
                     f"'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
                     f'tmux attach-session -t "{sf.tmux_session}"\''
                 )
