@@ -340,20 +340,39 @@ def create_local_workspaces(
         log.debug("Renamed workspace to '%s'", ws_info.title)
         time.sleep(0.3)
 
+        # Get the first surface ref from the newly created workspace
+        r = cmux_cmd("list-pane-surfaces", "--workspace", ws_ref, socket=socket)
+        first_sf_ref = ""
+        if r.returncode == 0:
+            for word in r.stdout.split():
+                if word.startswith("surface:"):
+                    first_sf_ref = word
+                    break
+        log.debug("First surface ref=%s", first_sf_ref)
+
         current_pane_index = -1
         first_surface = True
 
         for sf in ws_info.surfaces:
             if first_surface:
                 first_surface = False
-                log.debug("First surface, skipping pane/surface creation")
+                sf_ref = first_sf_ref
+                log.debug("First surface, using existing ref=%s", sf_ref)
             else:
                 if sf.pane_index > current_pane_index:
                     log.debug("Creating new split (direction=right)")
-                    cmux_cmd("new-split", "right", socket=socket)
+                    r = cmux_cmd("new-split", "right", socket=socket)
                 else:
                     log.debug("Creating new surface")
-                    cmux_cmd("new-surface", socket=socket)
+                    r = cmux_cmd("new-surface", socket=socket)
+                # Parse surface ref from "OK surface:N workspace:M"
+                sf_ref = ""
+                if r.returncode == 0:
+                    for word in r.stdout.split():
+                        if word.startswith("surface:"):
+                            sf_ref = word
+                            break
+                log.debug("New surface ref=%s", sf_ref)
                 time.sleep(0.3)
 
             current_pane_index = max(current_pane_index, sf.pane_index)
@@ -365,10 +384,10 @@ def create_local_workspaces(
                     f'tmux attach-session -t "{sf.tmux_session}"\''
                 )
                 log.info("  -> %s", sf.tmux_session)
-                log.debug("  SSH command: %s", ssh_cmd)
-                cmux_cmd("send", ssh_cmd, socket=socket)
+                log.debug("  SSH command: %s (surface=%s)", ssh_cmd, sf_ref)
+                cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
                 time.sleep(0.2)
-                cmux_cmd("send-key", "Enter", socket=socket)
+                cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
             else:
                 log.warning("  No tmux session found, leaving empty terminal")
 
