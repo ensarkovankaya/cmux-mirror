@@ -296,9 +296,25 @@ def build_workspaces(
     return workspaces
 
 
+def ensure_window(socket: str) -> None:
+    """Ensure a cmux window exists, creating one if needed."""
+    r = cmux_cmd("list-windows", socket=socket)
+    if r.returncode != 0 or not r.stdout.strip():
+        log.info("No cmux window found, creating one...")
+        r = cmux_cmd("new-window", socket=socket)
+        if r.returncode != 0:
+            raise MirrorError(
+                f"Could not create cmux window: {(r.stderr or r.stdout).strip()}"
+            )
+        time.sleep(0.5)
+    else:
+        log.debug("Existing cmux window found")
+
+
 def create_local_workspaces(
     host: str, workspaces: list[WorkspaceInfo], *, socket: str
 ) -> None:
+    ensure_window(socket)
     log.info("Creating local cmux workspaces and panes...")
 
     for ws_info in workspaces:
@@ -338,7 +354,7 @@ def create_local_workspaces(
 
             if sf.tmux_session:
                 ssh_cmd = (
-                    f"ssh -t {host} "
+                    f"TERM=xterm-256color ssh -t {host} "
                     f"'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
                     f'tmux attach-session -t "{sf.tmux_session}"\''
                 )
