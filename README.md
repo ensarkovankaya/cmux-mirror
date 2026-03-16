@@ -12,7 +12,7 @@ Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane str
 ## How It Works
 
 1. Connects to the remote machine via SSH and collects the cmux workspace/pane/surface structure along with the tmux session list
-2. Maps each surface to its tmux session by reading the session name from the tmux status bar
+2. Maps each surface to its tmux session by matching surface UUIDs encoded in session names
 3. Creates workspaces and panes locally in cmux with the same names
 4. Sends `ssh -t <host> tmux attach-session -t <session>` to each pane
 
@@ -67,7 +67,22 @@ Add the following to your shell profile (e.g. `~/.zshrc`) on the remote machine.
 ```bash
 # Auto-start tmux inside cmux terminals
 if [ -n "$CMUX_WORKSPACE_ID" ] && [ -z "$TMUX" ]; then
-  SESSION_NAME="cmux-${CMUX_WORKSPACE_ID}-${CMUX_SURFACE_ID}"
+  PANE_INDEX=$(cmux tree --all --json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    tree = json.load(sys.stdin)
+    sid = '$CMUX_SURFACE_ID'
+    for w in tree.get('windows', []):
+        for ws in w.get('workspaces', []):
+            for pane in ws.get('panes', []):
+                for sf in pane.get('surfaces', []):
+                    if sf.get('id') == sid:
+                        print(pane.get('index', 0)); sys.exit(0)
+except Exception:
+    pass
+print(0)
+" 2>/dev/null || echo 0)
+  SESSION_NAME="cmux_w-${CMUX_WORKSPACE_ID}_p-${PANE_INDEX}_s-${CMUX_SURFACE_ID}"
   tmux new-session -A -s "$SESSION_NAME"
   cmux close-surface
 fi
