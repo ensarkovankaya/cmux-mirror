@@ -121,10 +121,38 @@ def resolve_socket(socket_arg: str | None) -> str:
             log.debug("Using last recorded socket: %s", last_path)
             return last_path
 
+    # Auto-start cmux if not running
+    log.info("cmux is not running — starting it automatically…")
+    try:
+        subprocess.Popen(
+            ["cmux", "~"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise MirrorError(
+            "cmux executable not found. Install cmux or use --socket to specify the path."
+        )
+
+    # Poll for the socket to appear
+    all_candidates = list(SOCKET_CANDIDATES)
+    if LAST_SOCKET_PATH_FILE.is_file():
+        last_path = LAST_SOCKET_PATH_FILE.read_text().strip()
+        if last_path:
+            all_candidates.append(Path(last_path))
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        for candidate in all_candidates:
+            if candidate.is_socket():
+                log.debug("cmux socket appeared: %s", candidate)
+                return str(candidate)
+        time.sleep(0.5)
+
     tried = ", ".join(str(c) for c in SOCKET_CANDIDATES)
     raise MirrorError(
-        f"cmux socket not found. Tried: {tried}. "
-        "Make sure cmux is running or use --socket to specify the path."
+        f"cmux was started but socket did not appear within 10 seconds. Tried: {tried}."
     )
 
 
