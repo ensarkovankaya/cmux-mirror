@@ -30,11 +30,21 @@ LAST_SOCKET_PATH_FILE = Path.home() / ".cmuxterm" / "last-socket-path"
 
 REMOTE_SCRIPT = r"""
 echo '___TREE_JSON_START___'
-cmux tree --all --json --id-format uuids 2>/dev/null
+cmux tree --all --json 2>/dev/null
 echo '___TREE_JSON_END___'
 echo '___TMUX_SESSIONS_START___'
 tmux list-sessions -F '#{session_name}' 2>/dev/null || true
 echo '___TMUX_SESSIONS_END___'
+echo '___SCREEN_MAP_START___'
+for ws_ref in $(cmux list-workspaces 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^workspace:/) print $i}'); do
+  surfaces=$(cmux list-pane-surfaces --workspace "$ws_ref" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i ~ /^surface:/) print $i}')
+  for sf_ref in $surfaces; do
+    screen_line=$(cmux read-screen --workspace "$ws_ref" --surface "$sf_ref" --lines 1 2>/dev/null || true)
+    prefix=$(echo "$screen_line" | grep -o 'cmux-[A-F0-9]*' | head -1 || true)
+    echo "$ws_ref|$sf_ref|$prefix"
+  done
+done
+echo '___SCREEN_MAP_END___'
 """
 
 
@@ -45,14 +55,12 @@ class MirrorError(Exception):
 @dataclass
 class SurfaceInfo:
     pane_index: int
-    surface_uuid: str
     tmux_session: str = ""
 
 
 @dataclass
 class WorkspaceInfo:
     title: str
-    workspace_uuid: str
     surfaces: list[SurfaceInfo] = field(default_factory=list)
 
 
@@ -168,10 +176,13 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
     return result
 
 
-def parse_remote_data(raw: str) -> tuple[dict, set[str]]:
+def parse_remote_data(raw: str) -> tuple[dict, list[str], str]:
     tree_json_raw = extract_section(raw, "___TREE_JSON_START___", "___TREE_JSON_END___")
     tmux_sessions_raw = extract_section(
         raw, "___TMUX_SESSIONS_START___", "___TMUX_SESSIONS_END___"
+    )
+    screen_map_raw = extract_section(
+        raw, "___SCREEN_MAP_START___", "___SCREEN_MAP_END___"
     )
 
     if not tree_json_raw:
@@ -180,52 +191,106 @@ def parse_remote_data(raw: str) -> tuple[dict, set[str]]:
         raise MirrorError("Failed to retrieve tmux session list")
 
     tree = json.loads(tree_json_raw)
-    sessions = {s.strip() for s in tmux_sessions_raw.strip().splitlines() if s.strip()}
+    sessions = [s.strip() for s in tmux_sessions_raw.strip().splitlines() if s.strip()]
 
     log.debug("Parsed tree: %d windows", len(tree.get("windows", [])))
-    log.debug("Parsed tmux sessions (%d): %s", len(sessions), sorted(sessions))
+    log.debug("Parsed tmux sessions (%d): %s", len(sessions), sessions)
+    log.debug("Screen map raw:\n%s", screen_map_raw)
 
-    return tree, sessions
+    return tree, sessions, screen_map_raw
+
+
+def map_surfaces_to_sessions(
+    sessions: list[str], screen_map_raw: str
+) -> tuple[dict[str, str], list[str]]:
+    """Map surface refs to tmux session names using screen prefixes.
+
+    The screen shows the tmux status bar with a truncated session name
+    followed by the window index. For example, session
+    "cmux-E3FD2ED9-E210-..." appears as "cmux-E3FD0" where "E3FD" is
+    the truncated UUID and "0" is the tmux window number. We strip the
+    last character (window index) and match with startswith.
+    """
+    surface_to_session: dict[str, str] = {}
+    consumed: set[str] = set()
+
+    for line in screen_map_raw.strip().splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 3 or not parts[2]:
+            log.debug("Skipping screen map line (no prefix): %s", line)
+            continue
+        sf_ref, raw_prefix = parts[1], parts[2]
+
+        # Strip trailing tmux window index (last char)
+        prefix = raw_prefix[:-1] if len(raw_prefix) > len("cmux-") else raw_prefix
+        log.debug("Surface %s: raw_prefix=%s, match_prefix=%s", sf_ref, raw_prefix, prefix)
+
+        for ses in sessions:
+            if ses in consumed:
+                continue
+            if ses.startswith(prefix):
+                surface_to_session[sf_ref] = ses
+                consumed.add(ses)
+                log.debug("  Mapped %s -> %s", sf_ref, ses)
+                break
+        else:
+            log.debug("  No session match for %s (prefix=%s)", sf_ref, prefix)
+
+    remaining = [s for s in sessions if s not in consumed]
+    log.debug(
+        "Surface mapping: %d mapped, %d remaining sessions",
+        len(surface_to_session), len(remaining),
+    )
+    log.debug("Remaining sessions: %s", remaining)
+    return surface_to_session, remaining
 
 
 def build_workspaces(
-    tree: dict, sessions: set[str]
+    tree: dict,
+    sessions: list[str],
+    surface_to_session: dict[str, str],
 ) -> list[WorkspaceInfo]:
     workspaces: list[WorkspaceInfo] = []
 
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
-            ws_uuid = ws["id"]
             surfaces: list[SurfaceInfo] = []
-
             for pane in ws.get("panes", []):
                 for surface in pane.get("surfaces", []):
-                    sf_uuid = surface["id"]
-                    expected_session = f"cmux-{ws_uuid}-{sf_uuid}"
-                    matched = expected_session if expected_session in sessions else ""
-
                     sf = SurfaceInfo(
                         pane_index=pane.get("index", 0),
-                        surface_uuid=sf_uuid,
-                        tmux_session=matched,
+                        tmux_session=surface_to_session.get(surface["ref"], ""),
                     )
                     surfaces.append(sf)
+                    log.debug(
+                        "  Surface ref=%s pane_index=%d -> session=%s",
+                        surface["ref"], sf.pane_index, sf.tmux_session or "(none)",
+                    )
+            workspaces.append(WorkspaceInfo(title=ws["title"], surfaces=surfaces))
+            log.debug("Workspace '%s': %d surfaces", ws["title"], len(surfaces))
 
-                    if matched:
-                        log.debug("  Matched: %s", expected_session)
-                    else:
-                        log.debug("  No match for expected session: %s", expected_session)
-
-            ws_info = WorkspaceInfo(
-                title=ws["title"], workspace_uuid=ws_uuid, surfaces=surfaces
-            )
-            workspaces.append(ws_info)
-
-            matched_count = sum(1 for s in surfaces if s.tmux_session)
-            log.debug(
-                "Workspace '%s' (uuid=%s): %d surfaces, %d matched",
-                ws["title"], ws_uuid, len(surfaces), matched_count,
-            )
+    # Second pass: match unmatched surfaces by workspace UUID
+    remaining = list(sessions)
+    for ws_info in workspaces:
+        unmatched = [s for s in ws_info.surfaces if not s.tmux_session]
+        matched = [s for s in ws_info.surfaces if s.tmux_session]
+        if not unmatched or not matched:
+            continue
+        # Extract workspace UUID (first 36 chars after "cmux-")
+        ws_uuid = matched[0].tmux_session[len("cmux-") : len("cmux-") + 36]
+        candidates = [s for s in remaining if s.startswith(f"cmux-{ws_uuid}-")]
+        log.debug(
+            "Workspace '%s': %d unmatched, %d candidates (uuid=%s)",
+            ws_info.title, len(unmatched), len(candidates), ws_uuid,
+        )
+        for i, surface in enumerate(unmatched):
+            if i < len(candidates):
+                surface.tmux_session = candidates[i]
+                remaining.remove(candidates[i])
+                log.debug("  Fallback matched surface -> %s", candidates[i])
 
     log.info("Built %d workspaces", len(workspaces))
     return workspaces
@@ -318,8 +383,11 @@ def _run() -> None:
     socket = resolve_socket(args.socket)
 
     raw = fetch_remote_data(args.host, args.remote_path)
-    tree, sessions = parse_remote_data(raw)
-    workspaces = build_workspaces(tree, sessions)
+    tree, sessions, screen_map_raw = parse_remote_data(raw)
+    surface_to_session, remaining_sessions = map_surfaces_to_sessions(
+        sessions, screen_map_raw
+    )
+    workspaces = build_workspaces(tree, remaining_sessions, surface_to_session)
     create_local_workspaces(args.host, workspaces, socket=socket)
 
     log.info("Done! Remote cmux structure mirrored locally.")
