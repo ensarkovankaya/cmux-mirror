@@ -334,10 +334,10 @@ def create_local_workspaces(
         time.sleep(0.5)
 
         # Select the new workspace so subsequent commands target it
-        cmux_cmd("select-workspace", ws_ref, socket=socket)
+        cmux_cmd("select-workspace", "--workspace", ws_ref, socket=socket)
         time.sleep(0.3)
 
-        cmux_cmd("rename-workspace", ws_info.title, socket=socket)
+        cmux_cmd("rename-workspace", "--workspace", ws_ref, ws_info.title, socket=socket)
         log.debug("Renamed workspace to '%s'", ws_info.title)
         time.sleep(0.3)
 
@@ -362,10 +362,10 @@ def create_local_workspaces(
             else:
                 if sf.pane_index > current_pane_index:
                     log.debug("Creating new split (direction=right)")
-                    r = cmux_cmd("new-split", "right", socket=socket)
+                    r = cmux_cmd("new-split", "right", "--workspace", ws_ref, socket=socket)
                 else:
                     log.debug("Creating new surface")
-                    r = cmux_cmd("new-surface", socket=socket)
+                    r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
                 # Parse surface ref from "OK surface:N workspace:M"
                 sf_ref = ""
                 if r.returncode == 0:
