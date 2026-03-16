@@ -18,7 +18,15 @@ from pathlib import Path
 
 log = logging.getLogger("cmux-mirror")
 
-DEFAULT_SOCKET_PATH = "/tmp/cmux.sock"
+SOCKET_CANDIDATES = [
+    Path.home() / "Library" / "Application Support" / "cmux" / "cmux.sock",
+    Path("/tmp/cmux.sock"),
+    Path("/tmp/cmux-debug.sock"),
+    Path("/tmp/cmux-staging.sock"),
+    Path("/tmp/cmux-nightly.sock"),
+]
+
+LAST_SOCKET_PATH_FILE = Path.home() / ".cmuxterm" / "last-socket-path"
 
 REMOTE_SCRIPT = r"""
 echo '___TREE_JSON_START___'
@@ -81,18 +89,36 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_socket(socket_arg: str | None) -> str:
-    path = (
-        socket_arg
-        or os.environ.get("CMUX_SOCKET_PATH")
-        or DEFAULT_SOCKET_PATH
+    # Explicit path: --socket flag or CMUX_SOCKET_PATH env
+    explicit = socket_arg or os.environ.get("CMUX_SOCKET_PATH")
+    if explicit:
+        p = Path(explicit)
+        if not p.is_socket():
+            raise MirrorError(
+                f"cmux socket not found at {explicit}. "
+                "Make sure cmux is running and the socket path is correct."
+            )
+        log.debug("Using explicit cmux socket: %s", explicit)
+        return explicit
+
+    # Auto-discovery: try known candidates
+    for candidate in SOCKET_CANDIDATES:
+        if candidate.is_socket():
+            log.debug("Discovered cmux socket: %s", candidate)
+            return str(candidate)
+
+    # Fallback: read last-socket-path file
+    if LAST_SOCKET_PATH_FILE.is_file():
+        last_path = LAST_SOCKET_PATH_FILE.read_text().strip()
+        if last_path and Path(last_path).is_socket():
+            log.debug("Using last recorded socket: %s", last_path)
+            return last_path
+
+    tried = ", ".join(str(c) for c in SOCKET_CANDIDATES)
+    raise MirrorError(
+        f"cmux socket not found. Tried: {tried}. "
+        "Make sure cmux is running or use --socket to specify the path."
     )
-    if not Path(path).is_socket():
-        raise MirrorError(
-            f"cmux socket not found at {path}. "
-            "Make sure cmux is running and the socket path is correct."
-        )
-    log.debug("Using cmux socket: %s", path)
-    return path
 
 
 def run_command(
