@@ -38,6 +38,9 @@ cmux-mirror myhost
 # Custom remote PATH
 cmux-mirror myhost --remote-path /usr/local/bin:/usr/bin:/bin
 
+# Custom cmux socket path
+cmux-mirror --socket /tmp/cmux-debug.sock
+
 # Run without installing
 uvx --from git+https://github.com/ensarkovankaya/cmux-mirror cmux-mirror
 
@@ -46,7 +49,16 @@ uv run cmux-mirror
 python -m cmux_mirror
 ```
 
-> **Note:** Run this from inside a cmux terminal (requires cmux CLI socket access).
+The script connects to cmux via its Unix socket. Socket path is resolved in order:
+1. `--socket` argument
+2. `CMUX_SOCKET_PATH` environment variable
+3. `/tmp/cmux.sock` (default)
+
+This means you can run the script from any terminal — not just from inside cmux.
+
+## Logs
+
+All logs are written to `~/.cmux-mirror/logs/` with a timestamped filename. The log file includes debug-level details while stderr only shows info-level messages.
 
 ## Remote Setup
 
