@@ -84,7 +84,7 @@ print(0)
 " 2>/dev/null || echo 0)
   SESSION_NAME="cmux_w-${CMUX_WORKSPACE_ID}_p-${PANE_INDEX}_s-${CMUX_SURFACE_ID}"
   tmux new-session -A -s "$SESSION_NAME"
-  cmux close-surface
+  cmux close-surface 2>/dev/null || cmux close-pane 2>/dev/null || exit
 fi
 ```
 
