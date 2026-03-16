@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
 log = logging.getLogger("cmux-mirror")
 
@@ -73,14 +75,18 @@ def parse_args() -> argparse.Namespace:
 def run_command(
     cmd: list[str], *, check: bool = True, timeout: int = 30
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    log.debug("Running command: %s", cmd)
+    r = subprocess.run(
         cmd, capture_output=True, text=True, check=check, timeout=timeout
     )
+    log.debug("  exit=%d stdout=%r stderr=%r", r.returncode, r.stdout[:200], r.stderr[:200])
+    return r
 
 
 def ssh_exec(
     host: str, script: str, *, remote_path: str, timeout: int = 60
 ) -> str:
+    log.debug("SSH exec on %s (timeout=%ds)", host, timeout)
     r = run_command(
         ["ssh", host, f'export PATH="{remote_path}:$PATH"\n{script}'],
         timeout=timeout,
@@ -95,7 +101,9 @@ def cmux_cmd(*args: str, check: bool = False) -> subprocess.CompletedProcess[str
 def fetch_remote_data(host: str, remote_path: str) -> str:
     log.info("Fetching cmux and tmux info from remote (%s)...", host)
     try:
-        return ssh_exec(host, REMOTE_SCRIPT, remote_path=remote_path, timeout=120)
+        data = ssh_exec(host, REMOTE_SCRIPT, remote_path=remote_path, timeout=120)
+        log.debug("Remote data length: %d bytes", len(data))
+        return data
     except Exception as e:
         raise MirrorError(f"SSH connection failed: {e}") from e
 
@@ -112,7 +120,9 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
             continue
         if inside:
             lines.append(line)
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    log.debug("Section [%s]: %d lines, %d bytes", start_marker, len(lines), len(result))
+    return result
 
 
 def parse_remote_data(raw: str) -> tuple[dict, list[str], str]:
@@ -131,6 +141,11 @@ def parse_remote_data(raw: str) -> tuple[dict, list[str], str]:
 
     tree = json.loads(tree_json_raw)
     sessions = [s.strip() for s in tmux_sessions_raw.strip().splitlines() if s.strip()]
+
+    log.debug("Parsed tree: %d windows", len(tree.get("windows", [])))
+    log.debug("Parsed tmux sessions (%d): %s", len(sessions), sessions)
+    log.debug("Screen map raw:\n%s", screen_map_raw)
+
     return tree, sessions, screen_map_raw
 
 
@@ -146,6 +161,7 @@ def map_surfaces_to_sessions(
             continue
         parts = line.split("|")
         if len(parts) < 3 or not parts[2]:
+            log.debug("Skipping screen map line (no prefix): %s", line)
             continue
         sf_ref, prefix = parts[1], parts[2]
         prefix_start = prefix.replace("cmux-", "")
@@ -157,9 +173,14 @@ def map_surfaces_to_sessions(
             if ses_start == prefix_start:
                 surface_to_session[sf_ref] = ses
                 consumed.add(ses)
+                log.debug("Mapped surface %s -> session %s (prefix=%s)", sf_ref, ses, prefix)
                 break
+        else:
+            log.debug("No session match for surface %s (prefix=%s)", sf_ref, prefix)
 
     remaining = [s for s in sessions if s not in consumed]
+    log.debug("Surface mapping complete: %d mapped, %d remaining sessions", len(surface_to_session), len(remaining))
+    log.debug("Remaining sessions: %s", remaining)
     return surface_to_session, remaining
 
 
@@ -175,13 +196,17 @@ def build_workspaces(
             surfaces: list[SurfaceInfo] = []
             for pane in ws.get("panes", []):
                 for surface in pane.get("surfaces", []):
-                    surfaces.append(
-                        SurfaceInfo(
-                            pane_index=pane.get("index", 0),
-                            tmux_session=surface_to_session.get(surface["ref"], ""),
-                        )
+                    sf = SurfaceInfo(
+                        pane_index=pane.get("index", 0),
+                        tmux_session=surface_to_session.get(surface["ref"], ""),
+                    )
+                    surfaces.append(sf)
+                    log.debug(
+                        "  Surface ref=%s pane_index=%d -> session=%s",
+                        surface["ref"], sf.pane_index, sf.tmux_session or "(none)",
                     )
             workspaces.append(WorkspaceInfo(title=ws["title"], surfaces=surfaces))
+            log.debug("Workspace '%s': %d surfaces", ws["title"], len(surfaces))
 
     # Second pass: match unmatched surfaces by workspace UUID
     remaining = list(sessions)
@@ -192,11 +217,17 @@ def build_workspaces(
             continue
         ws_uuid = matched[0].tmux_session[len("cmux-") : len("cmux-") + 36]
         candidates = [s for s in remaining if s.startswith(f"cmux-{ws_uuid}-")]
+        log.debug(
+            "Workspace '%s': %d unmatched, %d candidates (uuid=%s)",
+            ws_info.title, len(unmatched), len(candidates), ws_uuid,
+        )
         for i, surface in enumerate(unmatched):
             if i < len(candidates):
                 surface.tmux_session = candidates[i]
                 remaining.remove(candidates[i])
+                log.debug("  Fallback matched surface -> %s", candidates[i])
 
+    log.info("Built %d workspaces", len(workspaces))
     return workspaces
 
 
@@ -204,15 +235,20 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
     log.info("Creating local cmux workspaces and panes...")
 
     for ws_info in workspaces:
-        log.info("Workspace: %s", ws_info.title)
+        log.info("Workspace: %s (%d surfaces)", ws_info.title, len(ws_info.surfaces))
 
         r = cmux_cmd("new-workspace")
         if r.returncode != 0:
-            log.warning("Could not create workspace: %s", ws_info.title)
+            log.warning(
+                "Could not create workspace: %s — %s",
+                ws_info.title,
+                (r.stderr or r.stdout).strip(),
+            )
             continue
         time.sleep(0.5)
 
-        cmux_cmd("rename-workspace", ws_info.title)
+        r = cmux_cmd("rename-workspace", ws_info.title)
+        log.debug("Renamed workspace to '%s' (exit=%d)", ws_info.title, r.returncode)
         time.sleep(0.3)
 
         current_pane_index = -1
@@ -221,10 +257,13 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
         for sf in ws_info.surfaces:
             if first_surface:
                 first_surface = False
+                log.debug("First surface, skipping pane/surface creation")
             else:
                 if sf.pane_index > current_pane_index:
+                    log.debug("Creating new pane (direction=right)")
                     cmux_cmd("new-pane", "--direction", "right")
                 else:
+                    log.debug("Creating new surface")
                     cmux_cmd("new-surface")
                 time.sleep(0.3)
 
@@ -237,6 +276,7 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
                     f'tmux attach-session -t "{sf.tmux_session}"\''
                 )
                 log.info("  -> %s", sf.tmux_session)
+                log.debug("  SSH command: %s", ssh_cmd)
                 cmux_cmd("send", ssh_cmd)
                 time.sleep(0.2)
                 cmux_cmd("send-key", "Enter")
@@ -244,14 +284,34 @@ def create_local_workspaces(host: str, workspaces: list[WorkspaceInfo]) -> None:
                 log.warning("  No tmux session found, leaving empty terminal")
 
 
-def main() -> None:
-    logging.basicConfig(
-        format="[mirror] %(message)s",
-        level=logging.INFO,
-        stream=sys.stderr,
+def setup_logging() -> None:
+    log_dir = Path.home() / ".cmux-mirror" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.INFO)
+    stderr_handler.setFormatter(logging.Formatter("[mirror] %(message)s"))
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("[mirror] %(asctime)s %(levelname)s %(message)s")
     )
 
+    root = logging.getLogger("cmux-mirror")
+    root.setLevel(logging.DEBUG)
+    root.addHandler(stderr_handler)
+    root.addHandler(file_handler)
+
+    log.info("Log file: %s", log_file)
+
+
+def main() -> None:
     args = parse_args()
+    setup_logging()
+
+    log.debug("Args: host=%s, remote_path=%s", args.host, args.remote_path)
 
     raw = fetch_remote_data(args.host, args.remote_path)
     tree, sessions, screen_map_raw = parse_remote_data(raw)
