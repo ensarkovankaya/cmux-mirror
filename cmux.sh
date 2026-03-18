@@ -19,7 +19,7 @@ except Exception:
 print('0 ')
 " 2>/dev/null)
   PANE_INDEX="${PANE_INDEX:-0}"
-  SESSION_NAME="cmux_w-${CMUX_WORKSPACE_ID}_p-${PANE_INDEX}_s-${CMUX_SURFACE_ID}"
+  SESSION_NAME="cmux_v1_w-${CMUX_WORKSPACE_ID}_p-${PANE_INDEX}_s-${CMUX_SURFACE_ID}"
 
   # Persist surface ref mapping for cmux-mirror
   if [ -n "$SURFACE_REF" ]; then

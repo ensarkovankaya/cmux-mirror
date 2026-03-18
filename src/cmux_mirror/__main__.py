@@ -37,14 +37,14 @@ echo '___TMUX_SESSIONS_START___'
 tmux list-sessions -F '#{session_name}|#{session_created}' 2>/dev/null || true
 echo '___TMUX_SESSIONS_END___'
 echo '___SESSION_MAP_START___'
-for f in ~/.cmux-sessions/surface:*; do
+(for f in ~/.cmux-sessions/surface:*; do
   [ -f "$f" ] && echo "$(basename "$f")|$(cat "$f")"
-done
+done) 2>/dev/null || true
 echo '___SESSION_MAP_END___'
 """
 
 SESSION_RE = re.compile(
-    r"^cmux_w-(?P<workspace>[A-Fa-f0-9-]+)_p-(?P<pane>\d+)_s-(?P<surface>[A-Fa-f0-9-]+)$"
+    r"^cmux_v(?P<version>\d+)_w-(?P<workspace>[A-Fa-f0-9-]+)_p-(?P<pane>\d+)_s-(?P<surface>[A-Fa-f0-9-]+)$"
 )
 
 
@@ -54,6 +54,7 @@ def parse_session_name(name: str) -> dict | None:
     if not m:
         return None
     return {
+        "version": int(m.group("version")),
         "workspace": m.group("workspace"),
         "pane_index": int(m.group("pane")),
         "surface": m.group("surface"),
