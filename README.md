@@ -11,6 +11,62 @@ Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane str
 
 ## How It Works
 
+### Overview
+
+```
+  LOCAL MACHINE                              REMOTE MACHINE
+ +-------------------+     SSH query      +-------------------+
+ |                   | -----------------> |                   |
+ |   cmux-mirror     |                    |   cmux + tmux     |
+ |                   | <----------------- |                   |
+ +-------------------+   tree, sessions,  +-------------------+
+         |               session map
+         v
+ +-------------------+
+ |   local cmux      |
+ |                   |
+ | +-workspace: dev--+ ---ssh--> tmux: cmux_v1_w-abc_p-0_s-def
+ | | +-pane 0        |
+ | |   +-surface A --+ ---ssh--> tmux: cmux_v1_w-abc_p-0_s-ghi
+ | |   +-surface B   |
+ | | +-pane 1        |
+ | |   +-surface C --+ ---ssh--> tmux: cmux_v1_w-abc_p-1_s-jkl
+ | +-----------------+
+ +-------------------+
+```
+
+### Data Flow
+
+```
+1. FETCH                 2. MAP                    3. CREATE & CONNECT
+
+Remote cmux              ~/.cmux-sessions/         Local cmux
++-----------+            +------------------+      +------------------+
+| tree JSON | ----+      | surface:abc ->   |      | workspace: dev   |
++-----------+     |      |   cmux_v1_w-..   |      |  pane 0          |
+                  +----> | surface:def ->   | ---> |   surface A -------> ssh -t host
+Remote tmux       |      |   cmux_v1_w-..   |      |   surface B -------> tmux attach
++-----------+     |      +------------------+      |  pane 1          |
+| sessions  | ----+       (stale entries           |   surface C -------> ...
++-----------+              filtered out)           +------------------+
+```
+
+### Incremental Sync
+
+When a workspace already exists locally, cmux-mirror only adds the missing panes:
+
+```
+Remote has 3 surfaces        Local has 2 surfaces       After sync: 3 surfaces
+
++-workspace: dev---+        +-workspace: dev---+        +-workspace: dev---+
+| surface A        |        | surface X        |        | surface X        |  (kept)
+| surface B        |        | surface Y        |        | surface Y        |  (kept)
+| surface C        |        +------------------+        | surface Z ---------> ssh
++------------------+                                    +------------------+  (added)
+```
+
+### Steps
+
 1. Connects to the remote machine via SSH and collects the cmux workspace/pane/surface structure, tmux session list, and file-based session mappings from `~/.cmux-sessions/`
 2. Maps each surface to its tmux session using file-based mappings written by `cmux.sh` (stale mappings pointing to dead sessions are skipped)
 3. Creates workspaces and panes locally in cmux with the same names. Existing workspaces are detected — if a workspace already exists but has fewer panes than the remote, only the missing panes are added (incremental sync)
