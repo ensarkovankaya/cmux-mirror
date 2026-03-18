@@ -104,21 +104,39 @@ def parse_args() -> argparse.Namespace:
 
     # --- show subcommand ---
     show_parser = subparsers.add_parser(
-        "show", help="Display remote workspace structure as ASCII tree"
+        "show", help="Display workspace structure as ASCII tree"
     )
-    show_parser.add_argument(
+    show_subparsers = show_parser.add_subparsers(dest="show_command")
+
+    # show remote
+    show_remote_parser = show_subparsers.add_parser(
+        "remote", help="Display remote workspace structure (via SSH)"
+    )
+    show_remote_parser.add_argument(
         "host", nargs="?", default="home",
         help="SSH host to query (default: home)",
     )
-    show_parser.add_argument(
+    show_remote_parser.add_argument(
         "--remote-path",
         default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         help="PATH to prepend on the remote machine",
     )
 
+    # show local
+    show_local_parser = show_subparsers.add_parser(
+        "local", help="Display local workspace structure"
+    )
+    show_local_parser.add_argument(
+        "--socket", default=None,
+        help="cmux socket path (default: $CMUX_SOCKET_PATH or auto-discover)",
+    )
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
+        sys.exit(0)
+    if args.command == "show" and args.show_command is None:
+        show_parser.print_help()
         sys.exit(0)
     return args
 
@@ -517,10 +535,54 @@ def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
             print()
 
 
-def _run_show(args: argparse.Namespace) -> None:
+def _run_show_remote(args: argparse.Namespace) -> None:
     """Fetch remote state and print ASCII tree."""
     raw = fetch_remote_data(args.host, args.remote_path)
     tree, sessions, session_map = parse_remote_data(raw)
+    surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
+    render_tree_ascii(tree, surface_to_session)
+
+
+def _run_show_local(args: argparse.Namespace) -> None:
+    """Query local cmux and print ASCII tree."""
+    socket = resolve_socket(args.socket)
+
+    # Get tree JSON
+    r = cmux_cmd("tree", "--all", "--json", socket=socket)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise MirrorError("Failed to retrieve local cmux tree")
+    tree = json.loads(r.stdout)
+
+    # Get live tmux sessions
+    sessions: list[tuple[str, int]] = []
+    try:
+        r = run_command(
+            ["tmux", "list-sessions", "-F", "#{session_name}|#{session_created}"],
+            check=False,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" in line:
+                    name, ts = line.rsplit("|", 1)
+                    sessions.append((name.strip(), int(ts.strip())))
+                else:
+                    sessions.append((line, 0))
+    except Exception:
+        pass
+
+    # Read local session mapping files
+    session_map: dict[str, str] = {}
+    session_dir = Path.home() / ".cmux-sessions"
+    if session_dir.is_dir():
+        for f in session_dir.glob("surface:*"):
+            if f.is_file():
+                session_name = f.read_text().strip()
+                if session_name:
+                    session_map[f.name] = session_name
+
     surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
     render_tree_ascii(tree, surface_to_session)
 
@@ -530,8 +592,12 @@ def _run() -> None:
     setup_logging()
 
     if args.command == "show":
-        log.debug("Args: command=show, host=%s, remote_path=%s", args.host, args.remote_path)
-        _run_show(args)
+        if args.show_command == "remote":
+            log.debug("Args: command=show remote, host=%s, remote_path=%s", args.host, args.remote_path)
+            _run_show_remote(args)
+        elif args.show_command == "local":
+            log.debug("Args: command=show local, socket=%s", args.socket)
+            _run_show_local(args)
         return
 
     # command == "sync"
