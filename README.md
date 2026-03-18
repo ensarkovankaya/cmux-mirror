@@ -137,10 +137,61 @@ Source [`cmux.sh`](cmux.sh) from your shell profile (e.g. `~/.zshrc`) on the rem
 source /path/to/cmux.sh
 ```
 
+### Why tmux?
+
+cmux surfaces don't support direct SSH attachment — there's no way to "connect" to a remote cmux surface from another machine. tmux bridges this gap by providing named sessions that SSH can attach to:
+
+```
+Without tmux (doesn't work):
+
+  Local machine               Remote machine
+  +-----------+               +-----------+
+  | cmux      |   ssh ----X   | cmux      |
+  | surface A |               | surface 1 |   <-- no way to attach via SSH
+  +-----------+               +-----------+
+
+
+With tmux (how cmux-mirror works):
+
+  Local machine               Remote machine
+  +-----------+               +---------------------------+
+  | cmux      |               | cmux                      |
+  | surface A | --ssh-------> | surface 1                 |
+  |           |  tmux attach  |   +---------------------+ |
+  |           |  -t session1  |   | tmux session1       | |
+  |           |               |   | (shell runs here)   | |
+  +-----------+               +--+---------------------+-+
+```
+
+Each remote cmux surface runs inside a tmux session. The local side attaches to that session over SSH — so you get a live terminal connection to the exact surface.
+
+### What `cmux.sh` does
+
 When a terminal opens inside cmux, `cmux.sh` automatically:
 
 1. Detects the current surface using `cmux tree --all --json`
 2. Starts a tmux session named `cmux_v1_w-<workspace_id>_p-<pane_index>_s-<surface_id>`
 3. Persists the surface-to-session mapping in `~/.cmux-sessions/` so cmux-mirror can discover it
+
+```
+  cmux.sh startup flow:
+
+  cmux opens surface
+        |
+        v
+  cmux tree --all --json
+        |
+        v
+  find current surface ref (the one with "here": true)
+        |
+        v
+  tmux new-session -A -s "cmux_v1_w-<ws>_p-<pane>_s-<surface>"
+        |
+        v
+  echo session_name > ~/.cmux-sessions/surface:<ref>
+        |
+        v
+  shell is now running inside tmux (attachable via SSH)
+```
 
 This is required for the sync command to work — it connects to these tmux sessions from the local machine.
