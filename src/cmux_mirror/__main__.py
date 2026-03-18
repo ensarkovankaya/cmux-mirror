@@ -46,7 +46,7 @@ echo '___PANE_DIMS_START___'
 for f in ~/.cmux-sessions/surface:*; do
   [ -f "$f" ] || continue
   SESSION=$(cat "$f")
-  DIMS=$(tmux display-message -t "$SESSION" -p '#{pane_width}x#{pane_height}|#{window_width}x#{window_height}' 2>/dev/null)
+  DIMS=$(tmux display-message -t "$SESSION" -p '#{pane_width}x#{pane_height}' 2>/dev/null)
   [ -n "$DIMS" ] && echo "$(basename "$f")|$DIMS"
 done
 echo '___PANE_DIMS_END___'
@@ -269,7 +269,7 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
 
 def parse_remote_data(
     raw: str,
-) -> tuple[dict, list[tuple[str, int]], dict[str, str], dict[str, tuple[int, int, int, int]]]:
+) -> tuple[dict, list[tuple[str, int]], dict[str, str], dict[str, tuple[int, int]]]:
     tree_json_raw = extract_section(raw, "___TREE_JSON_START___", "___TREE_JSON_END___")
     tmux_sessions_raw = extract_section(
         raw, "___TMUX_SESSIONS_START___", "___TMUX_SESSIONS_END___"
@@ -308,21 +308,20 @@ def parse_remote_data(
             ref, session_name = line.split("|", 1)
             session_map[ref.strip()] = session_name.strip()
 
-    # Parse pane dimensions: surface_ref -> (pane_w, pane_h, win_w, win_h)
-    # Format: surface:ref|PANE_WxPANE_H|WIN_WxWIN_H
-    surface_dims: dict[str, tuple[int, int, int, int]] = {}
+    # Parse pane dimensions: surface_ref -> (pane_w, pane_h)
+    # Format: surface:ref|WxH
+    surface_dims: dict[str, tuple[int, int]] = {}
     if pane_dims_raw:
         for line in pane_dims_raw.strip().splitlines():
             line = line.strip()
             if not line or "|" not in line:
                 continue
             parts = line.split("|")
-            if len(parts) >= 3 and "x" in parts[1] and "x" in parts[2]:
+            if len(parts) >= 2 and "x" in parts[1]:
                 try:
                     ref = parts[0].strip()
                     pw, ph = parts[1].split("x", 1)
-                    ww, wh = parts[2].split("x", 1)
-                    surface_dims[ref] = (int(pw), int(ph), int(ww), int(wh))
+                    surface_dims[ref] = (int(pw), int(ph))
                 except ValueError:
                     pass
 
@@ -367,26 +366,29 @@ def map_sessions_to_surfaces(
 
 
 def _infer_split_direction(
-    prev_dims: tuple[int, int, int, int],
-    curr_dims: tuple[int, int, int, int],
+    prev_dims: tuple[int, int],
+    curr_dims: tuple[int, int],
+    ref_width: int,
+    ref_height: int,
 ) -> str:
     """Infer split direction between two panes using their dimensions.
 
-    Each dims tuple is (pane_w, pane_h, window_w, window_h).
+    Each dims tuple is (pane_w, pane_h). ref_width/ref_height are the max
+    dimensions across ALL surfaces (approximating the full terminal size).
 
     Heuristic order:
-    1. If prev pane has full window height -> it wasn't split vertically -> RIGHT
-    2. If prev pane has full window width -> it wasn't split horizontally -> DOWN
+    1. If prev pane spans full ref height -> horizontal split -> RIGHT
+    2. If prev pane spans full ref width -> vertical split -> DOWN
     3. If both panes have same width (±1) -> they share a column -> DOWN
     4. If both panes have same height (±1) -> they share a row -> RIGHT
     5. Fallback -> RIGHT
     """
-    pw, ph, ww, wh = prev_dims
-    cw, ch, _, _ = curr_dims
+    pw, ph = prev_dims
+    cw, ch = curr_dims
 
-    if abs(ph - wh) <= 1:
+    if abs(ph - ref_height) <= 1:
         return "right"
-    if abs(pw - ww) <= 1:
+    if abs(pw - ref_width) <= 1:
         return "down"
     if abs(pw - cw) <= 1:
         return "down"
@@ -397,18 +399,30 @@ def _infer_split_direction(
 
 def infer_split_directions(
     tree: dict,
-    surface_dims: dict[str, tuple[int, int, int, int]],
+    surface_dims: dict[str, tuple[int, int]],
 ) -> dict[str, dict[int, str]]:
     """Infer split direction per pane using surface dimensions.
 
+    Uses max width/height across ALL surfaces as the "full terminal" reference,
+    since each cmux surface runs in its own tmux session (so window dims == pane dims).
+
     Returns: {workspace_title: {pane_index: "right" or "down"}}
     """
+    # Compute global reference dimensions from all surfaces
+    if surface_dims:
+        ref_width = max(w for w, h in surface_dims.values())
+        ref_height = max(h for w, h in surface_dims.values())
+    else:
+        ref_width = ref_height = 0
+
+    log.debug("Global ref dims: %dx%d (from %d surfaces)", ref_width, ref_height, len(surface_dims))
+
     directions: dict[str, dict[int, str]] = {}
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             title = ws.get("title", "")
             # Collect one dims per pane, keyed by pane index
-            pane_dims: list[tuple[int, tuple[int, int, int, int]]] = []
+            pane_dims: list[tuple[int, tuple[int, int]]] = []
             for pane in ws.get("panes", []):
                 pane_idx = pane.get("index", 0)
                 for surface in pane.get("surfaces", []):
@@ -425,12 +439,12 @@ def infer_split_directions(
             for i in range(1, len(pane_dims)):
                 prev_idx, prev_d = pane_dims[i - 1]
                 curr_idx, curr_d = pane_dims[i]
-                direction = _infer_split_direction(prev_d, curr_d)
+                direction = _infer_split_direction(prev_d, curr_d, ref_width, ref_height)
                 ws_dirs[curr_idx] = direction
                 log.debug(
-                    "Workspace '%s' pane %d->%d: %s (prev=%dx%d curr=%dx%d win=%dx%d)",
+                    "Workspace '%s' pane %d->%d: %s (prev=%dx%d curr=%dx%d ref=%dx%d)",
                     title, prev_idx, curr_idx, direction,
-                    prev_d[0], prev_d[1], curr_d[0], curr_d[1], prev_d[2], prev_d[3],
+                    prev_d[0], prev_d[1], curr_d[0], curr_d[1], ref_width, ref_height,
                 )
 
             directions[title] = ws_dirs
