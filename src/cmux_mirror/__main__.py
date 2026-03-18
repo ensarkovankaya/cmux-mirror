@@ -360,22 +360,34 @@ def build_workspaces(
     return workspaces
 
 
-def get_existing_workspace_titles(*, socket: str) -> set[str]:
-    """Return titles of all existing local workspaces."""
+def get_existing_workspace_info(*, socket: str) -> dict[str, dict]:
+    """Return info about existing local workspaces: {title: {ref, pane_count, surface_refs}}."""
     r = cmux_cmd("tree", "--all", "--json", socket=socket)
     if r.returncode != 0 or not r.stdout.strip():
-        return set()
+        return {}
     try:
         tree = json.loads(r.stdout)
     except json.JSONDecodeError:
-        return set()
-    titles: set[str] = set()
+        return {}
+    info: dict[str, dict] = {}
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             title = ws.get("title", "").strip()
-            if title:
-                titles.add(title)
-    return titles
+            if not title:
+                continue
+            surface_refs: list[str] = []
+            for pane in ws.get("panes", []):
+                for surface in pane.get("surfaces", []):
+                    ref = surface.get("ref", "")
+                    if ref:
+                        surface_refs.append(ref)
+            ws_ref = ws.get("ref", "")
+            info[title] = {
+                "ref": ws_ref,
+                "pane_count": len(surface_refs),
+                "surface_refs": surface_refs,
+            }
+    return info
 
 
 def ensure_window(socket: str) -> None:
@@ -393,17 +405,112 @@ def ensure_window(socket: str) -> None:
         log.debug("Existing cmux window found")
 
 
+def _send_ssh_to_surface(
+    host: str, sf: SurfaceInfo, sf_ref: str, *, socket: str
+) -> None:
+    """Send SSH+tmux attach command to a surface and persist the mapping."""
+    if not sf.tmux_session:
+        log.warning("  No tmux session found, leaving empty terminal")
+        return
+
+    ssh_cmd = (
+        f"exec ssh -t -o SetEnv=TERM=xterm-256color {host} "
+        f"'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
+        f'tmux attach-session -t "{sf.tmux_session}"\''
+    )
+    log.info("  -> %s", sf.tmux_session)
+    log.debug("  SSH command: %s (surface=%s)", ssh_cmd, sf_ref)
+    if sf_ref:
+        cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
+        time.sleep(0.2)
+        cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
+        # Persist remote session mapping for show local
+        REMOTE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        (REMOTE_SESSION_DIR / sf_ref).write_text(sf.tmux_session)
+        log.debug("Saved remote mapping %s -> %s", sf_ref, sf.tmux_session)
+    else:
+        cmux_cmd("send", ssh_cmd, socket=socket)
+        time.sleep(0.2)
+        cmux_cmd("send-key", "Enter", socket=socket)
+
+
+def _add_missing_panes(
+    host: str,
+    ws_info: WorkspaceInfo,
+    existing: dict,
+    *,
+    socket: str,
+) -> None:
+    """Add missing panes to an existing workspace that has fewer surfaces than remote."""
+    ws_ref = existing["ref"]
+    local_count = existing["pane_count"]
+    remote_count = len(ws_info.surfaces)
+
+    log.info(
+        "Workspace '%s' exists with %d surface(s), remote has %d — adding %d missing",
+        ws_info.title, local_count, remote_count, remote_count - local_count,
+    )
+
+    # Select the workspace so splits go to the right place
+    cmux_cmd("select-workspace", "--workspace", ws_ref, socket=socket)
+    time.sleep(0.3)
+
+    # Clean stale remote session mappings for this workspace's existing surfaces
+    for old_ref in existing["surface_refs"]:
+        stale = REMOTE_SESSION_DIR / old_ref
+        if stale.exists():
+            stale.unlink()
+            log.debug("Removed stale remote mapping %s", old_ref)
+
+    # Track the highest pane index we've seen so far (from the existing surfaces)
+    current_pane_index = -1
+    for sf in ws_info.surfaces[:local_count]:
+        current_pane_index = max(current_pane_index, sf.pane_index)
+
+    # Re-persist remote session mappings for existing surfaces (without re-sending SSH)
+    for i, sf in enumerate(ws_info.surfaces[:local_count]):
+        if i < len(existing["surface_refs"]) and sf.tmux_session:
+            REMOTE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+            (REMOTE_SESSION_DIR / existing["surface_refs"][i]).write_text(sf.tmux_session)
+            log.debug("Re-persisted mapping %s -> %s", existing["surface_refs"][i], sf.tmux_session)
+
+    # Now add splits for the new surfaces
+    for sf in ws_info.surfaces[local_count:]:
+        if sf.pane_index > current_pane_index:
+            log.debug("Creating new split (direction=right)")
+            r = cmux_cmd("new-split", "right", "--workspace", ws_ref, socket=socket)
+        else:
+            log.debug("Creating new surface")
+            r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
+        sf_ref = ""
+        if r.returncode == 0:
+            for word in r.stdout.split():
+                if word.startswith("surface:"):
+                    sf_ref = word
+                    break
+        log.debug("New surface ref=%s", sf_ref)
+        time.sleep(0.3)
+
+        current_pane_index = max(current_pane_index, sf.pane_index)
+        _send_ssh_to_surface(host, sf, sf_ref, socket=socket)
+
+
 def create_local_workspaces(
     host: str, workspaces: list[WorkspaceInfo], *, socket: str
 ) -> None:
     ensure_window(socket)
-    existing_titles = get_existing_workspace_titles(socket=socket)
+    existing_info = get_existing_workspace_info(socket=socket)
     log.info("Creating local cmux workspaces and panes...")
 
     for ws_info in workspaces:
-        if ws_info.title in existing_titles:
-            log.info("Workspace '%s' already exists, skipping", ws_info.title)
+        existing = existing_info.get(ws_info.title)
+        if existing:
+            if existing["pane_count"] >= len(ws_info.surfaces):
+                log.info("Workspace '%s' already exists with enough panes, skipping", ws_info.title)
+                continue
+            _add_missing_panes(host, ws_info, existing, socket=socket)
             continue
+
         log.info("Workspace: %s (%d surfaces)", ws_info.title, len(ws_info.surfaces))
 
         r = cmux_cmd("new-workspace", socket=socket)
@@ -463,29 +570,7 @@ def create_local_workspaces(
                 time.sleep(0.3)
 
             current_pane_index = max(current_pane_index, sf.pane_index)
-
-            if sf.tmux_session:
-                ssh_cmd = (
-                    f"exec ssh -t -o SetEnv=TERM=xterm-256color {host} "
-                    f"'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
-                    f'tmux attach-session -t "{sf.tmux_session}"\''
-                )
-                log.info("  -> %s", sf.tmux_session)
-                log.debug("  SSH command: %s (surface=%s)", ssh_cmd, sf_ref)
-                if sf_ref:
-                    cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
-                    time.sleep(0.2)
-                    cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
-                    # Persist remote session mapping for show local
-                    REMOTE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
-                    (REMOTE_SESSION_DIR / sf_ref).write_text(sf.tmux_session)
-                    log.debug("Saved remote mapping %s -> %s", sf_ref, sf.tmux_session)
-                else:
-                    cmux_cmd("send", ssh_cmd, socket=socket)
-                    time.sleep(0.2)
-                    cmux_cmd("send-key", "Enter", socket=socket)
-            else:
-                log.warning("  No tmux session found, leaving empty terminal")
+            _send_ssh_to_surface(host, sf, sf_ref, socket=socket)
 
 
 def setup_logging() -> None:
