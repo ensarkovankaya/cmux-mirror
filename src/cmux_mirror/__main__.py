@@ -42,6 +42,14 @@ echo '___SESSION_MAP_START___'
   [ -f "$f" ] && echo "$(basename "$f")|$(cat "$f")"
 done) 2>/dev/null || true
 echo '___SESSION_MAP_END___'
+echo '___PANE_DIMS_START___'
+for f in ~/.cmux-sessions/surface:*; do
+  [ -f "$f" ] || continue
+  SESSION=$(cat "$f")
+  DIMS=$(tmux display-message -t "$SESSION" -p '#{pane_width}x#{pane_height}' 2>/dev/null)
+  [ -n "$DIMS" ] && echo "$(basename "$f")|$DIMS"
+done
+echo '___PANE_DIMS_END___'
 """
 
 SESSION_RE = re.compile(
@@ -70,6 +78,7 @@ class MirrorError(Exception):
 class SurfaceInfo:
     pane_index: int
     tmux_session: str = ""
+    split_direction: str = "right"
 
 
 @dataclass
@@ -258,13 +267,18 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
     return result
 
 
-def parse_remote_data(raw: str) -> tuple[dict, list[tuple[str, int]], dict[str, str]]:
+def parse_remote_data(
+    raw: str,
+) -> tuple[dict, list[tuple[str, int]], dict[str, str], dict[str, tuple[int, int]]]:
     tree_json_raw = extract_section(raw, "___TREE_JSON_START___", "___TREE_JSON_END___")
     tmux_sessions_raw = extract_section(
         raw, "___TMUX_SESSIONS_START___", "___TMUX_SESSIONS_END___"
     )
     session_map_raw = extract_section(
         raw, "___SESSION_MAP_START___", "___SESSION_MAP_END___"
+    )
+    pane_dims_raw = extract_section(
+        raw, "___PANE_DIMS_START___", "___PANE_DIMS_END___"
     )
 
     if not tree_json_raw:
@@ -294,12 +308,28 @@ def parse_remote_data(raw: str) -> tuple[dict, list[tuple[str, int]], dict[str, 
             ref, session_name = line.split("|", 1)
             session_map[ref.strip()] = session_name.strip()
 
+    # Parse pane dimensions: surface_ref -> (width, height)
+    surface_dims: dict[str, tuple[int, int]] = {}
+    if pane_dims_raw:
+        for line in pane_dims_raw.strip().splitlines():
+            line = line.strip()
+            if not line or "|" not in line:
+                continue
+            ref, dims = line.split("|", 1)
+            if "x" in dims:
+                try:
+                    w, h = dims.split("x", 1)
+                    surface_dims[ref.strip()] = (int(w), int(h))
+                except ValueError:
+                    pass
+
     log.debug("Parsed tree: %d windows", len(tree.get("windows", [])))
     log.debug("Tree JSON (first 2000 chars): %s", tree_json_raw[:2000])
     log.debug("Parsed tmux sessions (%d): %s", len(sessions), sessions)
     log.debug("Parsed session map (%d entries): %s", len(session_map), session_map)
+    log.debug("Parsed pane dims (%d entries): %s", len(surface_dims), surface_dims)
 
-    return tree, sessions, session_map
+    return tree, sessions, session_map, surface_dims
 
 
 def map_sessions_to_surfaces(
@@ -333,20 +363,65 @@ def map_sessions_to_surfaces(
     return surface_to_session
 
 
+def infer_split_directions(
+    tree: dict,
+    surface_dims: dict[str, tuple[int, int]],
+) -> dict[str, str]:
+    """Infer split direction per workspace using surface dimensions.
+
+    Returns: {workspace_title: "right" or "down"}
+    """
+    directions: dict[str, str] = {}
+    for window in tree.get("windows", []):
+        for ws in window.get("workspaces", []):
+            title = ws.get("title", "")
+            # Collect dims for surfaces in this workspace
+            dims: list[tuple[int, int]] = []
+            for pane in ws.get("panes", []):
+                for surface in pane.get("surfaces", []):
+                    ref = surface.get("ref", "")
+                    surface_key = f"surface:{ref}" if not ref.startswith("surface:") else ref
+                    if surface_key in surface_dims:
+                        dims.append(surface_dims[surface_key])
+                        if len(dims) >= 2:
+                            break
+                if len(dims) >= 2:
+                    break
+
+            if len(dims) >= 2:
+                w1, h1 = dims[0]
+                w2, h2 = dims[1]
+                if abs(w1 - w2) <= 2 and abs(h1 - h2) > 2:
+                    directions[title] = "down"
+                    log.debug("Workspace '%s': inferred down (widths %d~%d, heights %d~%d)", title, w1, w2, h1, h2)
+                else:
+                    directions[title] = "right"
+                    log.debug("Workspace '%s': inferred right (widths %d~%d, heights %d~%d)", title, w1, w2, h1, h2)
+            else:
+                directions[title] = "right"
+                log.debug("Workspace '%s': defaulting to right (only %d dims)", title, len(dims))
+
+    return directions
+
+
 def build_workspaces(
     tree: dict,
     surface_to_session: dict[str, str],
+    split_directions: dict[str, str] | None = None,
 ) -> list[WorkspaceInfo]:
     workspaces: list[WorkspaceInfo] = []
 
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
+            ws_title = ws.get("title", "")
+            ws_direction = (split_directions or {}).get(ws_title, "right")
             surfaces: list[SurfaceInfo] = []
             for pane in ws.get("panes", []):
                 for surface in pane.get("surfaces", []):
                     sf = SurfaceInfo(
                         pane_index=pane.get("index", 0),
                         tmux_session=surface_to_session.get(surface["ref"], ""),
+                        split_direction=ws_direction,
                     )
                     surfaces.append(sf)
                     log.debug(
@@ -477,8 +552,8 @@ def _add_missing_panes(
     # Now add splits for the new surfaces
     for sf in ws_info.surfaces[local_count:]:
         if sf.pane_index > current_pane_index:
-            log.debug("Creating new split (direction=right)")
-            r = cmux_cmd("new-split", "right", "--workspace", ws_ref, socket=socket)
+            log.debug("Creating new split (direction=%s)", sf.split_direction)
+            r = cmux_cmd("new-split", sf.split_direction, "--workspace", ws_ref, socket=socket)
         else:
             log.debug("Creating new surface")
             r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
@@ -554,8 +629,8 @@ def create_local_workspaces(
                 log.debug("First surface, using existing ref=%s", sf_ref)
             else:
                 if sf.pane_index > current_pane_index:
-                    log.debug("Creating new split (direction=right)")
-                    r = cmux_cmd("new-split", "right", "--workspace", ws_ref, socket=socket)
+                    log.debug("Creating new split (direction=%s)", sf.split_direction)
+                    r = cmux_cmd("new-split", sf.split_direction, "--workspace", ws_ref, socket=socket)
                 else:
                     log.debug("Creating new surface")
                     r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
@@ -634,7 +709,7 @@ def render_tree_ascii(
 def _run_show_remote(args: argparse.Namespace) -> None:
     """Fetch remote state and print ASCII tree."""
     raw = fetch_remote_data(args.host, args.remote_path)
-    tree, sessions, session_map = parse_remote_data(raw)
+    tree, sessions, session_map, _surface_dims = parse_remote_data(raw)
     surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
     render_tree_ascii(tree, surface_to_session)
 
@@ -712,9 +787,10 @@ def _run() -> None:
     socket = resolve_socket(args.socket)
 
     raw = fetch_remote_data(args.host, args.remote_path)
-    tree, sessions, session_map = parse_remote_data(raw)
+    tree, sessions, session_map, surface_dims = parse_remote_data(raw)
     surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
-    workspaces = build_workspaces(tree, surface_to_session)
+    split_directions = infer_split_directions(tree, surface_dims)
+    workspaces = build_workspaces(tree, surface_to_session, split_directions)
     create_local_workspaces(args.host, workspaces, socket=socket)
 
     log.info("Done! Remote cmux structure mirrored locally.")
