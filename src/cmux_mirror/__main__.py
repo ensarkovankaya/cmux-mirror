@@ -83,20 +83,20 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # --- mirror subcommand (default) ---
-    mirror_parser = subparsers.add_parser(
-        "mirror", help="Mirror remote cmux structure locally (default)"
+    # --- sync subcommand ---
+    sync_parser = subparsers.add_parser(
+        "sync", help="Mirror remote cmux structure locally"
     )
-    mirror_parser.add_argument(
+    sync_parser.add_argument(
         "host", nargs="?", default="home",
         help="SSH host to mirror from (default: home)",
     )
-    mirror_parser.add_argument(
+    sync_parser.add_argument(
         "--remote-path",
         default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         help="PATH to prepend on the remote machine",
     )
-    mirror_parser.add_argument(
+    sync_parser.add_argument(
         "--socket", default=None,
         help="cmux socket path (default: $CMUX_SOCKET_PATH or /tmp/cmux.sock)",
     )
@@ -115,14 +115,11 @@ def parse_args() -> argparse.Namespace:
         help="PATH to prepend on the remote machine",
     )
 
-    # When no subcommand given (or first arg isn't a known subcommand),
-    # treat as mirror command for backward compatibility
-    known_commands = {"mirror", "show"}
-    argv = sys.argv[1:]
-    if not argv or argv[0] not in known_commands and not argv[0].startswith("-"):
-        argv = ["mirror"] + argv
-
-    return parser.parse_args(argv)
+    args = parser.parse_args()
+    if args.command is None:
+        parser.print_help()
+        sys.exit(0)
+    return args
 
 
 def resolve_socket(socket_arg: str | None) -> str:
@@ -625,6 +622,7 @@ def _run() -> None:
         _run_show(args)
         return
 
+    # command == "sync"
     log.debug("Args: host=%s, remote_path=%s, socket=%s", args.host, args.remote_path, args.socket)
 
     socket = resolve_socket(args.socket)
