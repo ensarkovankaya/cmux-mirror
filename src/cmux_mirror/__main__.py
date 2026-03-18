@@ -36,6 +36,11 @@ echo '___TREE_JSON_END___'
 echo '___TMUX_SESSIONS_START___'
 tmux list-sessions -F '#{session_name}|#{session_created}' 2>/dev/null || true
 echo '___TMUX_SESSIONS_END___'
+echo '___SESSION_MAP_START___'
+ls ~/.cmux-sessions/surface:* 2>/dev/null | while read -r f; do
+  echo "$(basename "$f")|$(cat "$f")"
+done
+echo '___SESSION_MAP_END___'
 """
 
 SESSION_RE = re.compile(
@@ -236,10 +241,13 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
     return result
 
 
-def parse_remote_data(raw: str) -> tuple[dict, list[tuple[str, int]]]:
+def parse_remote_data(raw: str) -> tuple[dict, list[tuple[str, int]], dict[str, str]]:
     tree_json_raw = extract_section(raw, "___TREE_JSON_START___", "___TREE_JSON_END___")
     tmux_sessions_raw = extract_section(
         raw, "___TMUX_SESSIONS_START___", "___TMUX_SESSIONS_END___"
+    )
+    session_map_raw = extract_section(
+        raw, "___SESSION_MAP_START___", "___SESSION_MAP_END___"
     )
 
     if not tree_json_raw:
@@ -259,23 +267,46 @@ def parse_remote_data(raw: str) -> tuple[dict, list[tuple[str, int]]]:
         else:
             sessions.append((line, 0))
 
+    # Parse file-based session mapping: surface_ref -> session_name
+    session_map: dict[str, str] = {}
+    if session_map_raw:
+        for line in session_map_raw.strip().splitlines():
+            line = line.strip()
+            if not line or "|" not in line:
+                continue
+            ref, session_name = line.split("|", 1)
+            session_map[ref.strip()] = session_name.strip()
+
     log.debug("Parsed tree: %d windows", len(tree.get("windows", [])))
     log.debug("Tree JSON (first 2000 chars): %s", tree_json_raw[:2000])
     log.debug("Parsed tmux sessions (%d): %s", len(sessions), sessions)
+    log.debug("Parsed session map (%d entries): %s", len(session_map), session_map)
 
-    return tree, sessions
+    return tree, sessions, session_map
 
 
 def map_sessions_to_surfaces(
-    sessions: list[tuple[str, int]], tree: dict
+    sessions: list[tuple[str, int]],
+    tree: dict,
+    session_map: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Map surface refs to session names by matching surface UUIDs.
+    """Map surface refs to session names.
 
-    Falls back to matching by (workspace_id, pane_index) when surface UUIDs
-    don't match (e.g. after a cmux restart that assigns new surface UUIDs).
-    When no UUID fields exist in the tree, uses creation-time based positional
-    matching to align session workspace groups with tree workspaces.
+    Strategies tried in order:
+    1. File-based mapping from ~/.cmux-sessions/ (most reliable)
+    2. Surface UUID match from tree JSON id fields
+    3. Workspace+pane fallback using (workspace_id, pane_index)
+    4. Positional creation-time matching (last resort)
     """
+    surface_to_session: dict[str, str] = {}
+
+    # Strategy 1: file-based mapping from ~/.cmux-sessions/
+    if session_map:
+        for ref, session_name in session_map.items():
+            surface_to_session[ref] = session_name
+            log.debug("Mapped (by session file) %s -> %s", ref, session_name)
+        log.info("File-based mapping: %d surfaces mapped", len(surface_to_session))
+
     # Build UUID -> ref mapping from tree
     uuid_to_ref: dict[str, str] = {}
     # Also build (workspace_id, pane_index) -> ref for fallback matching
@@ -300,7 +331,6 @@ def map_sessions_to_surfaces(
               surface_count, len(uuid_to_ref), len(ws_pane_to_ref))
 
     # Parse sessions, match by surface UUID
-    surface_to_session: dict[str, str] = {}
     unmatched_sessions: list[tuple[str, dict, int]] = []
     for ses, created in sessions:
         parsed = parse_session_name(ses)
@@ -581,8 +611,8 @@ def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
 def _run_show(args: argparse.Namespace) -> None:
     """Fetch remote state and print ASCII tree."""
     raw = fetch_remote_data(args.host, args.remote_path)
-    tree, sessions = parse_remote_data(raw)
-    surface_to_session = map_sessions_to_surfaces(sessions, tree)
+    tree, sessions, session_map = parse_remote_data(raw)
+    surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
     render_tree_ascii(tree, surface_to_session)
 
 
@@ -600,8 +630,8 @@ def _run() -> None:
     socket = resolve_socket(args.socket)
 
     raw = fetch_remote_data(args.host, args.remote_path)
-    tree, sessions = parse_remote_data(raw)
-    surface_to_session = map_sessions_to_surfaces(sessions, tree)
+    tree, sessions, session_map = parse_remote_data(raw)
+    surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
     workspaces = build_workspaces(tree, surface_to_session)
     create_local_workspaces(args.host, workspaces, socket=socket)
 
