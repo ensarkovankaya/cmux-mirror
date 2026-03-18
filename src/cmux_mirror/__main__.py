@@ -588,9 +588,13 @@ def _add_missing_panes(
             log.debug("Removed stale remote mapping %s", old_ref)
 
     # Track the highest pane index we've seen so far (from the existing surfaces)
+    # and seed pane_surface_map from existing surfaces
     current_pane_index = -1
-    for sf in ws_info.surfaces[:local_count]:
+    pane_surface_map: dict[int, str] = {}
+    for i, sf in enumerate(ws_info.surfaces[:local_count]):
         current_pane_index = max(current_pane_index, sf.pane_index)
+        if i < len(existing["surface_refs"]) and sf.pane_index not in pane_surface_map:
+            pane_surface_map[sf.pane_index] = existing["surface_refs"][i]
 
     # Re-persist remote session mappings for existing surfaces (without re-sending SSH)
     for i, sf in enumerate(ws_info.surfaces[:local_count]):
@@ -602,8 +606,12 @@ def _add_missing_panes(
     # Now add splits for the new surfaces
     for sf in ws_info.surfaces[local_count:]:
         if sf.pane_index > current_pane_index:
-            log.debug("Creating new split (direction=%s)", sf.split_direction)
-            r = cmux_cmd("new-split", sf.split_direction, "--workspace", ws_ref, socket=socket)
+            split_target = pane_surface_map.get(current_pane_index, "")
+            split_args = ["new-split", sf.split_direction, "--workspace", ws_ref]
+            if split_target:
+                split_args += ["--surface", split_target]
+            log.debug("Creating new split (direction=%s, target=%s)", sf.split_direction, split_target)
+            r = cmux_cmd(*split_args, socket=socket)
         else:
             log.debug("Creating new surface")
             r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
@@ -617,6 +625,8 @@ def _add_missing_panes(
         time.sleep(0.3)
 
         current_pane_index = max(current_pane_index, sf.pane_index)
+        if sf.pane_index not in pane_surface_map and sf_ref:
+            pane_surface_map[sf.pane_index] = sf_ref
         _send_ssh_to_surface(host, sf, sf_ref, socket=socket)
 
 
@@ -671,6 +681,7 @@ def create_local_workspaces(
 
         current_pane_index = -1
         first_surface = True
+        pane_surface_map: dict[int, str] = {}
 
         for sf in ws_info.surfaces:
             if first_surface:
@@ -679,8 +690,12 @@ def create_local_workspaces(
                 log.debug("First surface, using existing ref=%s", sf_ref)
             else:
                 if sf.pane_index > current_pane_index:
-                    log.debug("Creating new split (direction=%s)", sf.split_direction)
-                    r = cmux_cmd("new-split", sf.split_direction, "--workspace", ws_ref, socket=socket)
+                    split_target = pane_surface_map.get(current_pane_index, "")
+                    split_args = ["new-split", sf.split_direction, "--workspace", ws_ref]
+                    if split_target:
+                        split_args += ["--surface", split_target]
+                    log.debug("Creating new split (direction=%s, target=%s)", sf.split_direction, split_target)
+                    r = cmux_cmd(*split_args, socket=socket)
                 else:
                     log.debug("Creating new surface")
                     r = cmux_cmd("new-surface", "--workspace", ws_ref, socket=socket)
@@ -695,6 +710,8 @@ def create_local_workspaces(
                 time.sleep(0.3)
 
             current_pane_index = max(current_pane_index, sf.pane_index)
+            if sf.pane_index not in pane_surface_map and sf_ref:
+                pane_surface_map[sf.pane_index] = sf_ref
             _send_ssh_to_surface(host, sf, sf_ref, socket=socket)
 
 
