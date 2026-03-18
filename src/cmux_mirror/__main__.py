@@ -46,7 +46,7 @@ echo '___PANE_DIMS_START___'
 for f in ~/.cmux-sessions/surface:*; do
   [ -f "$f" ] || continue
   SESSION=$(cat "$f")
-  DIMS=$(tmux display-message -t "$SESSION" -p '#{pane_width}x#{pane_height}' 2>/dev/null)
+  DIMS=$(tmux display-message -t "$SESSION" -p '#{pane_width}x#{pane_height}|#{window_width}x#{window_height}' 2>/dev/null)
   [ -n "$DIMS" ] && echo "$(basename "$f")|$DIMS"
 done
 echo '___PANE_DIMS_END___'
@@ -269,7 +269,7 @@ def extract_section(data: str, start_marker: str, end_marker: str) -> str:
 
 def parse_remote_data(
     raw: str,
-) -> tuple[dict, list[tuple[str, int]], dict[str, str], dict[str, tuple[int, int]]]:
+) -> tuple[dict, list[tuple[str, int]], dict[str, str], dict[str, tuple[int, int, int, int]]]:
     tree_json_raw = extract_section(raw, "___TREE_JSON_START___", "___TREE_JSON_END___")
     tmux_sessions_raw = extract_section(
         raw, "___TMUX_SESSIONS_START___", "___TMUX_SESSIONS_END___"
@@ -308,18 +308,21 @@ def parse_remote_data(
             ref, session_name = line.split("|", 1)
             session_map[ref.strip()] = session_name.strip()
 
-    # Parse pane dimensions: surface_ref -> (width, height)
-    surface_dims: dict[str, tuple[int, int]] = {}
+    # Parse pane dimensions: surface_ref -> (pane_w, pane_h, win_w, win_h)
+    # Format: surface:ref|PANE_WxPANE_H|WIN_WxWIN_H
+    surface_dims: dict[str, tuple[int, int, int, int]] = {}
     if pane_dims_raw:
         for line in pane_dims_raw.strip().splitlines():
             line = line.strip()
             if not line or "|" not in line:
                 continue
-            ref, dims = line.split("|", 1)
-            if "x" in dims:
+            parts = line.split("|")
+            if len(parts) >= 3 and "x" in parts[1] and "x" in parts[2]:
                 try:
-                    w, h = dims.split("x", 1)
-                    surface_dims[ref.strip()] = (int(w), int(h))
+                    ref = parts[0].strip()
+                    pw, ph = parts[1].split("x", 1)
+                    ww, wh = parts[2].split("x", 1)
+                    surface_dims[ref] = (int(pw), int(ph), int(ww), int(wh))
                 except ValueError:
                     pass
 
@@ -363,43 +366,74 @@ def map_sessions_to_surfaces(
     return surface_to_session
 
 
+def _infer_split_direction(
+    prev_dims: tuple[int, int, int, int],
+    curr_dims: tuple[int, int, int, int],
+) -> str:
+    """Infer split direction between two panes using their dimensions.
+
+    Each dims tuple is (pane_w, pane_h, window_w, window_h).
+
+    Heuristic order:
+    1. If prev pane has full window height -> it wasn't split vertically -> RIGHT
+    2. If prev pane has full window width -> it wasn't split horizontally -> DOWN
+    3. If both panes have same width (±1) -> they share a column -> DOWN
+    4. If both panes have same height (±1) -> they share a row -> RIGHT
+    5. Fallback -> RIGHT
+    """
+    pw, ph, ww, wh = prev_dims
+    cw, ch, _, _ = curr_dims
+
+    if abs(ph - wh) <= 1:
+        return "right"
+    if abs(pw - ww) <= 1:
+        return "down"
+    if abs(pw - cw) <= 1:
+        return "down"
+    if abs(ph - ch) <= 1:
+        return "right"
+    return "right"
+
+
 def infer_split_directions(
     tree: dict,
-    surface_dims: dict[str, tuple[int, int]],
-) -> dict[str, str]:
-    """Infer split direction per workspace using surface dimensions.
+    surface_dims: dict[str, tuple[int, int, int, int]],
+) -> dict[str, dict[int, str]]:
+    """Infer split direction per pane using surface dimensions.
 
-    Returns: {workspace_title: "right" or "down"}
+    Returns: {workspace_title: {pane_index: "right" or "down"}}
     """
-    directions: dict[str, str] = {}
+    directions: dict[str, dict[int, str]] = {}
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             title = ws.get("title", "")
-            # Collect dims for surfaces in this workspace
-            dims: list[tuple[int, int]] = []
+            # Collect one dims per pane, keyed by pane index
+            pane_dims: list[tuple[int, tuple[int, int, int, int]]] = []
             for pane in ws.get("panes", []):
+                pane_idx = pane.get("index", 0)
                 for surface in pane.get("surfaces", []):
                     ref = surface.get("ref", "")
-                    surface_key = f"surface:{ref}" if not ref.startswith("surface:") else ref
-                    if surface_key in surface_dims:
-                        dims.append(surface_dims[surface_key])
-                        if len(dims) >= 2:
-                            break
-                if len(dims) >= 2:
-                    break
+                    key = f"surface:{ref}" if not ref.startswith("surface:") else ref
+                    if key in surface_dims:
+                        pane_dims.append((pane_idx, surface_dims[key]))
+                        break
 
-            if len(dims) >= 2:
-                w1, h1 = dims[0]
-                w2, h2 = dims[1]
-                if abs(w1 - w2) <= 2 and abs(h1 - h2) > 2:
-                    directions[title] = "down"
-                    log.debug("Workspace '%s': inferred down (widths %d~%d, heights %d~%d)", title, w1, w2, h1, h2)
-                else:
-                    directions[title] = "right"
-                    log.debug("Workspace '%s': inferred right (widths %d~%d, heights %d~%d)", title, w1, w2, h1, h2)
-            else:
-                directions[title] = "right"
-                log.debug("Workspace '%s': defaulting to right (only %d dims)", title, len(dims))
+            # Sort by pane index
+            pane_dims.sort(key=lambda x: x[0])
+
+            ws_dirs: dict[int, str] = {}
+            for i in range(1, len(pane_dims)):
+                prev_idx, prev_d = pane_dims[i - 1]
+                curr_idx, curr_d = pane_dims[i]
+                direction = _infer_split_direction(prev_d, curr_d)
+                ws_dirs[curr_idx] = direction
+                log.debug(
+                    "Workspace '%s' pane %d->%d: %s (prev=%dx%d curr=%dx%d win=%dx%d)",
+                    title, prev_idx, curr_idx, direction,
+                    prev_d[0], prev_d[1], curr_d[0], curr_d[1], prev_d[2], prev_d[3],
+                )
+
+            directions[title] = ws_dirs
 
     return directions
 
@@ -407,21 +441,23 @@ def infer_split_directions(
 def build_workspaces(
     tree: dict,
     surface_to_session: dict[str, str],
-    split_directions: dict[str, str] | None = None,
+    split_directions: dict[str, dict[int, str]] | None = None,
 ) -> list[WorkspaceInfo]:
     workspaces: list[WorkspaceInfo] = []
 
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             ws_title = ws.get("title", "")
-            ws_direction = (split_directions or {}).get(ws_title, "right")
+            ws_dirs = (split_directions or {}).get(ws_title, {})
             surfaces: list[SurfaceInfo] = []
             for pane in ws.get("panes", []):
+                pane_idx = pane.get("index", 0)
+                pane_direction = ws_dirs.get(pane_idx, "right")
                 for surface in pane.get("surfaces", []):
                     sf = SurfaceInfo(
-                        pane_index=pane.get("index", 0),
+                        pane_index=pane_idx,
                         tmux_session=surface_to_session.get(surface["ref"], ""),
-                        split_direction=ws_direction,
+                        split_direction=pane_direction,
                     )
                     surfaces.append(sf)
                     log.debug(
