@@ -28,6 +28,7 @@ SOCKET_CANDIDATES = [
 ]
 
 LAST_SOCKET_PATH_FILE = Path.home() / ".cmuxterm" / "last-socket-path"
+REMOTE_SESSION_DIR = Path.home() / ".cmux-remote-sessions"
 
 REMOTE_SCRIPT = r"""
 echo '___TREE_JSON_START___'
@@ -475,6 +476,10 @@ def create_local_workspaces(
                     cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
                     time.sleep(0.2)
                     cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
+                    # Persist remote session mapping for show local
+                    REMOTE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+                    (REMOTE_SESSION_DIR / sf_ref).write_text(sf.tmux_session)
+                    log.debug("Saved remote mapping %s -> %s", sf_ref, sf.tmux_session)
                 else:
                     cmux_cmd("send", ssh_cmd, socket=socket)
                     time.sleep(0.2)
@@ -506,8 +511,12 @@ def setup_logging() -> None:
     log.info("Log file: %s", log_file)
 
 
-def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
-    """Print remote workspace structure as an ASCII tree diagram."""
+def render_tree_ascii(
+    tree: dict,
+    surface_to_session: dict[str, str],
+    remote_session_map: dict[str, str] | None = None,
+) -> None:
+    """Print workspace structure as an ASCII tree diagram."""
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             title = ws.get("title", "(untitled)")
@@ -530,7 +539,9 @@ def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
                     ref = sf.get("ref", "?")
                     session = surface_to_session.get(ref)
                     session_str = f" \u2500\u2500 tmux: {session}" if session else ""
-                    print(f"{child_prefix}{sf_prefix}Surface {ref}{session_str}")
+                    remote_session = remote_session_map.get(ref) if remote_session_map else None
+                    remote_str = f" \u2500\u2500 remote: {remote_session}" if remote_session else ""
+                    print(f"{child_prefix}{sf_prefix}Surface {ref}{session_str}{remote_str}")
 
             print()
 
@@ -584,7 +595,17 @@ def _run_show_local(args: argparse.Namespace) -> None:
                     session_map[f.name] = session_name
 
     surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
-    render_tree_ascii(tree, surface_to_session)
+
+    # Read remote session mapping files
+    remote_session_map: dict[str, str] = {}
+    if REMOTE_SESSION_DIR.is_dir():
+        for f in REMOTE_SESSION_DIR.iterdir():
+            if f.is_file() and f.name.startswith("surface:"):
+                remote_name = f.read_text().strip()
+                if remote_name:
+                    remote_session_map[f.name] = remote_name
+
+    render_tree_ascii(tree, surface_to_session, remote_session_map)
 
 
 def _run() -> None:
