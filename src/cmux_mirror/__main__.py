@@ -99,8 +99,8 @@ def parse_args() -> argparse.Namespace:
         "sync", help="Mirror remote cmux structure locally"
     )
     sync_parser.add_argument(
-        "host", nargs="?", default="home",
-        help="SSH host to mirror from (default: home)",
+        "host", nargs="?", default=None,
+        help="SSH host to mirror from (falls back to $CMUX_MIRROR_DEFAULT_REMOTE)",
     )
     sync_parser.add_argument(
         "--remote-path",
@@ -123,8 +123,8 @@ def parse_args() -> argparse.Namespace:
         "remote", help="Display remote workspace structure (via SSH)"
     )
     show_remote_parser.add_argument(
-        "host", nargs="?", default="home",
-        help="SSH host to query (default: home)",
+        "host", nargs="?", default=None,
+        help="SSH host to query (falls back to $CMUX_MIRROR_DEFAULT_REMOTE)",
     )
     show_remote_parser.add_argument(
         "--remote-path",
@@ -149,6 +149,19 @@ def parse_args() -> argparse.Namespace:
         show_parser.print_help()
         sys.exit(0)
     return args
+
+
+def resolve_host(host_arg: str | None) -> str:
+    if host_arg:
+        return host_arg
+    env = os.environ.get("CMUX_MIRROR_DEFAULT_REMOTE")
+    if env:
+        return env
+    raise MirrorError(
+        "No remote host specified. Provide a host argument "
+        "(e.g. cmux-mirror sync user@host:22) or set "
+        "$CMUX_MIRROR_DEFAULT_REMOTE."
+    )
 
 
 def resolve_socket(socket_arg: str | None) -> str:
@@ -841,6 +854,7 @@ def _run() -> None:
 
     if args.command == "show":
         if args.show_command == "remote":
+            args.host = resolve_host(args.host)
             log.debug("Args: command=show remote, host=%s, remote_path=%s", args.host, args.remote_path)
             _run_show_remote(args)
         elif args.show_command == "local":
@@ -849,16 +863,17 @@ def _run() -> None:
         return
 
     # command == "sync"
-    log.debug("Args: host=%s, remote_path=%s, socket=%s", args.host, args.remote_path, args.socket)
+    host = resolve_host(args.host)
+    log.debug("Args: host=%s, remote_path=%s, socket=%s", host, args.remote_path, args.socket)
 
     socket = resolve_socket(args.socket)
 
-    raw = fetch_remote_data(args.host, args.remote_path)
+    raw = fetch_remote_data(host, args.remote_path)
     tree, sessions, session_map, surface_dims = parse_remote_data(raw)
     surface_to_session = map_sessions_to_surfaces(sessions, tree, session_map)
     split_directions = infer_split_directions(tree, surface_dims)
     workspaces = build_workspaces(tree, surface_to_session, split_directions)
-    create_local_workspaces(args.host, workspaces, socket=socket)
+    create_local_workspaces(host, workspaces, socket=socket)
 
     log.info("Done! Remote cmux structure mirrored locally.")
 

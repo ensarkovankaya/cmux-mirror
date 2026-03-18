@@ -7,7 +7,8 @@ Mirror remote [cmux](https://github.com/manaflow-ai/cmux) workspace and pane str
 - [uv](https://github.com/astral-sh/uv)
 - [cmux](https://github.com/manaflow-ai/cmux) on both local and remote machines
 - tmux on the remote machine
-- SSH access to the remote machine (default host: `home`)
+- SSH access to the remote machine
+- Set `CMUX_MIRROR_DEFAULT_REMOTE` env var to avoid passing the host each time (e.g. `export CMUX_MIRROR_DEFAULT_REMOTE=home`)
 
 ## How It Works
 
@@ -85,31 +86,32 @@ uv tool install git+https://github.com/ensarkovankaya/cmux-mirror
 ## Usage
 
 ```bash
-# Sync remote workspaces to local (default command)
-cmux-mirror sync
-
-# Sync from a custom host
+# Sync remote workspaces to local (host is required)
 cmux-mirror sync myhost
+
+# Or set a default remote and omit the host
+export CMUX_MIRROR_DEFAULT_REMOTE=home
+cmux-mirror sync
 
 # Custom remote PATH
 cmux-mirror sync myhost --remote-path /usr/local/bin:/usr/bin:/bin
 
 # Custom cmux socket path
-cmux-mirror sync --socket /tmp/cmux-debug.sock
+cmux-mirror sync myhost --socket /tmp/cmux-debug.sock
 
 # Show local workspace structure as ASCII tree
 cmux-mirror show local
 
 # Show remote workspace structure (via SSH)
-cmux-mirror show remote
 cmux-mirror show remote myhost
+cmux-mirror show remote   # uses $CMUX_MIRROR_DEFAULT_REMOTE
 
 # Run without installing
-uvx --from git+https://github.com/ensarkovankaya/cmux-mirror cmux-mirror sync
+uvx --from git+https://github.com/ensarkovankaya/cmux-mirror cmux-mirror sync myhost
 
 # Run from a local clone
-uv run cmux-mirror sync
-python -m cmux_mirror sync
+uv run cmux-mirror sync myhost
+python -m cmux_mirror sync myhost
 ```
 
 ### Socket Discovery
