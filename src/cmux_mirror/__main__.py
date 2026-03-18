@@ -554,7 +554,9 @@ def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
     for window in tree.get("windows", []):
         for ws in window.get("workspaces", []):
             title = ws.get("title", "(untitled)")
-            print(f"Workspace: {title}")
+            ws_id = ws.get("id", "")
+            id_str = f" [{ws_id}]" if ws_id else ""
+            print(f"Workspace: {title}{id_str}")
 
             panes = ws.get("panes", [])
             for pi, pane in enumerate(panes):
