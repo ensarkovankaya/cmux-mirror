@@ -76,23 +76,48 @@ def parse_args() -> argparse.Namespace:
         prog="cmux-mirror",
         description="Mirror remote cmux workspace structure to local cmux.",
     )
-    parser.add_argument(
-        "host",
-        nargs="?",
-        default="home",
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- mirror subcommand (default) ---
+    mirror_parser = subparsers.add_parser(
+        "mirror", help="Mirror remote cmux structure locally (default)"
+    )
+    mirror_parser.add_argument(
+        "host", nargs="?", default="home",
         help="SSH host to mirror from (default: home)",
     )
-    parser.add_argument(
+    mirror_parser.add_argument(
         "--remote-path",
         default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         help="PATH to prepend on the remote machine",
     )
-    parser.add_argument(
-        "--socket",
-        default=None,
+    mirror_parser.add_argument(
+        "--socket", default=None,
         help="cmux socket path (default: $CMUX_SOCKET_PATH or /tmp/cmux.sock)",
     )
-    return parser.parse_args()
+
+    # --- show subcommand ---
+    show_parser = subparsers.add_parser(
+        "show", help="Display remote workspace structure as ASCII tree"
+    )
+    show_parser.add_argument(
+        "host", nargs="?", default="home",
+        help="SSH host to query (default: home)",
+    )
+    show_parser.add_argument(
+        "--remote-path",
+        default="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        help="PATH to prepend on the remote machine",
+    )
+
+    # When no subcommand given (or first arg isn't a known subcommand),
+    # treat as mirror command for backward compatibility
+    known_commands = {"mirror", "show"}
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in known_commands and not argv[0].startswith("-"):
+        argv = ["mirror"] + argv
+
+    return parser.parse_args(argv)
 
 
 def resolve_socket(socket_arg: str | None) -> str:
@@ -524,9 +549,49 @@ def setup_logging() -> None:
     log.info("Log file: %s", log_file)
 
 
+def render_tree_ascii(tree: dict, surface_to_session: dict[str, str]) -> None:
+    """Print remote workspace structure as an ASCII tree diagram."""
+    for window in tree.get("windows", []):
+        for ws in window.get("workspaces", []):
+            title = ws.get("title", "(untitled)")
+            print(f"Workspace: {title}")
+
+            panes = ws.get("panes", [])
+            for pi, pane in enumerate(panes):
+                is_last_pane = pi == len(panes) - 1
+                pane_prefix = "\u2514\u2500\u2500 " if is_last_pane else "\u251c\u2500\u2500 "
+                child_prefix = "    " if is_last_pane else "\u2502   "
+                pane_index = pane.get("index", 0)
+                print(f"{pane_prefix}Pane {pane_index}")
+
+                surfaces = pane.get("surfaces", [])
+                for si, sf in enumerate(surfaces):
+                    is_last_sf = si == len(surfaces) - 1
+                    sf_prefix = "\u2514\u2500\u2500 " if is_last_sf else "\u251c\u2500\u2500 "
+                    ref = sf.get("ref", "?")
+                    session = surface_to_session.get(ref)
+                    session_str = f" \u2500\u2500 tmux: {session}" if session else ""
+                    print(f"{child_prefix}{sf_prefix}Surface {ref}{session_str}")
+
+            print()
+
+
+def _run_show(args: argparse.Namespace) -> None:
+    """Fetch remote state and print ASCII tree."""
+    raw = fetch_remote_data(args.host, args.remote_path)
+    tree, sessions = parse_remote_data(raw)
+    surface_to_session = map_sessions_to_surfaces(sessions, tree)
+    render_tree_ascii(tree, surface_to_session)
+
+
 def _run() -> None:
     args = parse_args()
     setup_logging()
+
+    if args.command == "show":
+        log.debug("Args: command=show, host=%s, remote_path=%s", args.host, args.remote_path)
+        _run_show(args)
+        return
 
     log.debug("Args: host=%s, remote_path=%s, socket=%s", args.host, args.remote_path, args.socket)
 
