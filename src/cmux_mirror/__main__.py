@@ -546,13 +546,13 @@ def ensure_window(socket: str) -> None:
 def _send_ssh_to_surface(
     host: str, sf: SurfaceInfo, sf_ref: str, *, socket: str
 ) -> None:
-    """Send SSH+tmux attach command to a surface via respawn-pane."""
+    """Send SSH+tmux attach command to a surface via send + send-key."""
     if not sf.tmux_session:
         log.warning("  No tmux session found, leaving empty terminal")
         return
 
     ssh_cmd = (
-        f"ssh -t -o SetEnv=TERM=xterm-256color {host} "
+        f"exec ssh -t -o SetEnv=TERM=xterm-256color {host} "
         f"'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH "
         f'tmux attach-session -t "{sf.tmux_session}"\''
     )
@@ -560,18 +560,26 @@ def _send_ssh_to_surface(
     log.debug("  SSH command: %s (surface=%s)", ssh_cmd, sf_ref)
 
     if sf_ref:
-        r = cmux_cmd("respawn-pane", "--surface", sf_ref, "--command", ssh_cmd, socket=socket)
+        r = cmux_cmd("send", "--surface", sf_ref, ssh_cmd, socket=socket)
         if r.returncode != 0:
-            log.warning("  respawn-pane failed: %s", (r.stderr or r.stdout).strip())
+            log.warning("  send failed: %s", (r.stderr or r.stdout).strip())
+            return
+        r = cmux_cmd("send-key", "--surface", sf_ref, "Enter", socket=socket)
+        if r.returncode != 0:
+            log.warning("  send-key failed: %s", (r.stderr or r.stdout).strip())
             return
         # Persist remote session mapping for show local
         REMOTE_SESSION_DIR.mkdir(parents=True, exist_ok=True)
         (REMOTE_SESSION_DIR / sf_ref).write_text(sf.tmux_session)
         log.debug("Saved remote mapping %s -> %s", sf_ref, sf.tmux_session)
     else:
-        r = cmux_cmd("respawn-pane", "--command", ssh_cmd, socket=socket)
+        r = cmux_cmd("send", ssh_cmd, socket=socket)
         if r.returncode != 0:
-            log.warning("  respawn-pane failed: %s", (r.stderr or r.stdout).strip())
+            log.warning("  send failed: %s", (r.stderr or r.stdout).strip())
+            return
+        r = cmux_cmd("send-key", "Enter", socket=socket)
+        if r.returncode != 0:
+            log.warning("  send-key failed: %s", (r.stderr or r.stdout).strip())
 
 
 def _add_missing_panes(
