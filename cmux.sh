@@ -27,6 +27,17 @@ print('0 ')
     echo "$SESSION_NAME" > ~/.cmux-sessions/"$SURFACE_REF"
   fi
 
+  # Write CMUX_* env vars to file so they can be sourced inside tmux
+  env | grep '^CMUX_' > ~/.cmux-sessions/"$SESSION_NAME".env
+
+  # Start/attach tmux
   tmux new-session -A -s "$SESSION_NAME"
   cmux close-surface 2>/dev/null || cmux close-pane 2>/dev/null || exit
+elif [ -n "$TMUX" ]; then
+  # Source CMUX env file for current session if it exists
+  _cmux_env=~/.cmux-sessions/$(tmux display-message -p '#S').env
+  if [ -f "$_cmux_env" ]; then
+    set -a; source "$_cmux_env"; set +a
+  fi
+  unset _cmux_env
 fi
